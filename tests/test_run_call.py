@@ -31,8 +31,12 @@ class FakeEngine:
         script: list[tuple[str, str]] | None = None,
         start_failures: int = 0,
         hangup_failures: int = 0,
+        goodbye_hangs: bool = False,
+        hangup_hangs: bool = False,
     ) -> None:
         self._hangup_failures = hangup_failures
+        self._goodbye_hangs = goodbye_hangs
+        self._hangup_hangs = hangup_hangs
         self.started: list[dict[str, Any]] = []
         self.start_attempts = 0
         self.goodbyes: list[float] = []
@@ -56,6 +60,8 @@ class FakeEngine:
             self._handler(role, text)
 
     async def say_goodbye(self, instructions: str) -> None:
+        if self._goodbye_hangs:
+            await asyncio.Event().wait()  # la despedida nunca retorna
         self.goodbyes.append(self.clock.now() if self.clock else 0.0)
 
     async def wait_for_hangup(self) -> EndReason:
@@ -66,6 +72,8 @@ class FakeEngine:
 
     async def hangup(self) -> None:
         self.hangups += 1
+        if self._hangup_hangs:
+            await asyncio.Event().wait()  # el colgado nunca retorna
         if self.hangups <= self._hangup_failures:
             msg = "LiveKit no respondió"
             raise RuntimeError(msg)
@@ -86,7 +94,12 @@ class FakeSleep:
             self.app.fail_next = 0
 
 
-def make(app: FakeAppClient, clock: FakeClock, heal_after: int | None = None) -> CallServices:
+def make(
+    app: FakeAppClient,
+    clock: FakeClock,
+    heal_after: int | None = None,
+    **overrides: Any,
+) -> CallServices:
     sleep = FakeSleep(clock, app, heal_after)
     buffer = TurnBuffer(HttpCallEventSink(app), sleep=sleep, now=clock.now)
     return CallServices(
@@ -95,6 +108,7 @@ def make(app: FakeAppClient, clock: FakeClock, heal_after: int | None = None) ->
         clock=clock,
         close=app.aclose,
         sleep=sleep,
+        **overrides,
     )
 
 
@@ -326,6 +340,7 @@ async def test_hard_cut_gives_up_after_bounded_attempts_but_still_reports_time_l
     assert reason is EndReason.TIME_LIMIT
     assert engine.hangups == 3  # acotado: no reintenta sin fin
     assert app.ends[CALL_ID]["ended_reason"] == "time_limit"
+    assert app.ends[CALL_ID]["error"] == "hangup_failed"  # la sala pudo quedar abierta
 
 
 async def test_context_failure_starts_generic_after_a_single_timeout() -> None:
@@ -361,3 +376,46 @@ async def test_context_failure_starts_generic_after_a_single_timeout() -> None:
     assert len(attempts) == 1  # un solo intento de GET context
     assert all(s > 100 for s in sleeps)  # solo temporizadores del tope, sin backoff de contexto
     assert engine.started[0]["voice"] == "roberto"  # configuración genérica
+
+
+async def test_goodbye_that_never_returns_does_not_block_the_hard_cut() -> None:
+    app, clock = FakeAppClient(), FakeClock()
+    engine = FakeEngine(hangup=None, goodbye_hangs=True)
+    engine.clock = clock
+    async with asyncio.timeout(3):
+        reason = await run_call(CALL_ID, engine, make(app, clock, goodbye_timeout_sec=0.05))
+    assert reason is EndReason.TIME_LIMIT
+    assert engine.hangups >= 1
+    assert app.ends[CALL_ID]["ended_reason"] == "time_limit"
+    assert app.ends[CALL_ID]["error"] is None
+
+
+async def test_hangup_that_never_returns_is_bounded_per_attempt() -> None:
+    app, clock = FakeAppClient(), FakeClock()
+    engine = FakeEngine(hangup=None, hangup_hangs=True)
+    engine.clock = clock
+    async with asyncio.timeout(3):
+        reason = await run_call(CALL_ID, engine, make(app, clock, hangup_timeout_sec=0.05))
+    assert reason is EndReason.TIME_LIMIT
+    assert engine.hangups == 3
+    assert app.ends[CALL_ID]["error"] == "hangup_failed"
+
+
+async def test_start_failure_retries_hangup_and_still_publishes_failed() -> None:
+    app, clock = FakeAppClient(), FakeClock()
+    engine = FakeEngine(start_failures=99, hangup_failures=2)
+    async with asyncio.timeout(3):
+        reason = await run_call(CALL_ID, engine, make(app, clock, hangup_timeout_sec=0.05))
+    assert reason is EndReason.FAILED
+    assert engine.hangups == 3  # dos fallos y un tercer intento que sí cuelga
+    assert app.ends[CALL_ID]["ended_reason"] == "failed"
+
+
+async def test_start_failure_with_hanging_hangup_still_publishes_failed() -> None:
+    app, clock = FakeAppClient(), FakeClock()
+    engine = FakeEngine(start_failures=99, hangup_hangs=True)
+    async with asyncio.timeout(3):
+        reason = await run_call(CALL_ID, engine, make(app, clock, hangup_timeout_sec=0.05))
+    assert reason is EndReason.FAILED
+    assert engine.hangups == 3
+    assert app.ends[CALL_ID]["ended_reason"] == "failed"

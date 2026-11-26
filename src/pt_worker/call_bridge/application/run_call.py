@@ -29,6 +29,7 @@ from pt_worker.call_bridge.domain.call import Call, CallLimits, EndReason
 
 logger = logging.getLogger(__name__)
 
+HANGUP_FAILED = "hangup_failed"  # el corte agotó intentos: la sala pudo quedar abierta
 ENGINE_FAILURE = "voice_engine_failure"  # texto fijo: nunca datos sensibles en `error`
 
 
@@ -44,6 +45,8 @@ class CallServices:
     max_start_retries: int = 3  # reintentos tras el primer intento
     start_backoff_sec: float = 5.0
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    goodbye_timeout_sec: float = 10.0  # tope a la despedida: no puede retrasar el corte
+    hangup_timeout_sec: float = 10.0  # tope por intento de colgado
 
 
 def _limits_from(context: dict[str, Any] | None) -> CallLimits:
@@ -83,8 +86,8 @@ async def run_call(
         await _start_with_retries(engine, spec, services)
     except Exception as exc:  # noqa: BLE001 - Phonic no arrancó: end `failed` y colgar
         await report_start_failure(call_id, exc, services, utcnow=utcnow)
-        with contextlib.suppress(Exception):
-            await engine.hangup()
+        if not await _hang_up(engine, services):
+            logger.error("no se pudo colgar tras el fallo de arranque; la sala pudo quedar abierta")
         return EndReason.FAILED
 
     call.start(clock.now())
@@ -92,7 +95,7 @@ async def run_call(
     reason = EndReason.COMPLETED
     error: str | None = None
     try:
-        reason = await _supervise(engine, services, call)
+        reason, error = await _supervise(engine, services, call)
     except Exception as exc:  # noqa: BLE001 - se cierra como fallida y se informa a la app
         logger.error("la llamada falló: %s", type(exc).__name__)
         reason, error = EndReason.FAILED, type(exc).__name__
@@ -160,7 +163,9 @@ class _TurnRecorder:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
 
-async def _supervise(engine: VoiceEngine, services: CallServices, call: Call) -> EndReason:
+async def _supervise(
+    engine: VoiceEngine, services: CallServices, call: Call
+) -> tuple[EndReason, str | None]:
     """Espera el cierre con el tope de duración: despedida a `goodbye_at`, corte a `max`.
 
     Los tiempos salen del dominio `Call`; el reloj y la espera son inyectables (tests sin esperar).
@@ -174,12 +179,13 @@ async def _supervise(engine: VoiceEngine, services: CallServices, call: Call) ->
         )
         await asyncio.wait({hangup, timer}, return_when=asyncio.FIRST_COMPLETED)
         if hangup.done():
-            return hangup.result()
+            return hangup.result(), None
 
         if call.should_say_goodbye(now()):
             call.begin_ending()
             try:
-                await engine.say_goodbye(GOODBYE_INSTRUCTIONS)
+                async with asyncio.timeout(services.goodbye_timeout_sec):
+                    await engine.say_goodbye(GOODBYE_INSTRUCTIONS)
             except Exception as exc:  # noqa: BLE001 - sin despedida igual se corta a tiempo
                 logger.warning("no se pudo pedir la despedida: %s", type(exc).__name__)
 
@@ -188,10 +194,12 @@ async def _supervise(engine: VoiceEngine, services: CallServices, call: Call) ->
         )
         await asyncio.wait({hangup, timer}, return_when=asyncio.FIRST_COMPLETED)
         if hangup.done():
-            return hangup.result()
+            return hangup.result(), None
         # El temporizador venció: se corta siempre, aunque despierte una pizca antes del límite.
-        await _hard_cut(engine, services)
-        return EndReason.TIME_LIMIT
+        if await _hang_up(engine, services):
+            return EndReason.TIME_LIMIT, None
+        logger.error("el corte duro agotó los intentos; la sala pudo quedar abierta")
+        return EndReason.TIME_LIMIT, HANGUP_FAILED
     finally:
         for task in (timer, hangup):
             if task is not None and not task.done():
@@ -206,18 +214,23 @@ HANGUP_ATTEMPTS = 3  # el corte duro se reintenta de forma acotada si LiveKit fa
 HANGUP_RETRY_SEC = 1.0
 
 
-async def _hard_cut(engine: VoiceEngine, services: CallServices) -> None:
-    """Cuelga la sala al vencer el tope; un fallo al colgar no cambia el motivo (`time_limit`)."""
+async def _hang_up(engine: VoiceEngine, services: CallServices) -> bool:
+    """Cuelga la sala con reintento acotado y timeout por intento. True si colgó.
+
+    Un fallo al colgar no cambia el motivo del cierre; solo se informa con `error`.
+    """
     for attempt in range(1, HANGUP_ATTEMPTS + 1):
         try:
-            await engine.hangup()
-            return
-        except Exception as exc:  # noqa: BLE001 - el motivo del cierre sigue siendo time_limit
+            async with asyncio.timeout(services.hangup_timeout_sec):
+                await engine.hangup()
+            return True
+        except Exception as exc:  # noqa: BLE001 - incluye TimeoutError del intento
             logger.warning(
-                "falló el corte duro (%d/%d): %s", attempt, HANGUP_ATTEMPTS, type(exc).__name__
+                "falló el colgado (%d/%d): %s", attempt, HANGUP_ATTEMPTS, type(exc).__name__
             )
             if attempt < HANGUP_ATTEMPTS:
                 await services.sleep(HANGUP_RETRY_SEC)
+    return False
 
 
 async def report_start_failure(

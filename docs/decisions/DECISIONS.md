@@ -148,8 +148,19 @@ Correcciones tras la verificación independiente (W2):
   construye la imagen sin publicarla. No requiere secretos (las pruebas no usan red).
 - Deuda: HEALTHCHECK. El healthcheck HTTP del worker (W4, módulo `health/`) sigue pendiente; mientras tanto el
   host debe reiniciar por código de salida.
-- Deuda: `pip-audit` sigue sin añadirse al CI. Las acciones/imagen de uv usan tags flotantes (`latest`, `@v4`);
-  fijar versiones/digests.
+- Deuda: `pip-audit` sigue sin añadirse al CI. RESUELTO: imagen base `python:3.12.16-slim@sha256`, `uv:0.13.7@sha256`,
+  `setup-uv` con `version: 0.13.7` y acciones fijadas por SHA de commit (checkout v4.4.0, setup-uv v5.4.2).
+  Al actualizar, resolver de nuevo el digest/SHA; no usar tags flotantes.
+
+## Fiabilidad del corte (R4-002 y siguientes)
+- `say_goodbye` va dentro de `asyncio.timeout(goodbye_timeout_sec)` (10 s): una despedida colgada ya no
+  retrasa el temporizador de corte de las 5:00. Si vence o falla, solo se registra el tipo de excepción.
+- El colgado (corte duro y fallo de arranque) usa un helper único: 3 intentos, `asyncio.timeout`
+  (`hangup_timeout_sec`, 10 s) por intento y 1 s de pausa. Si se agotan, se registra a nivel error.
+- Corte agotado: `ended_reason` sigue siendo `time_limit`, pero `end.error = "hangup_failed"` para señalar
+  que la sala pudo quedar abierta. Es el campo `error` (string|null) de docs/04; no cambia el contrato.
+- PENDIENTE: avisar a la sesión de la app (gentle-shell 01a20c84-0f1c-7467-a992-e9f805a53d9e) por si quiere
+  tratar `error="hangup_failed"` (p. ej. alertar o reconciliar salas abiertas).
 
 ## Deudas
 - `pip-audit` (listado en el roadmap de W0) no se agregó; decidir si entra en el CI de W1.
