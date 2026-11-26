@@ -74,3 +74,11 @@ def test_settings_ignore_a_dotenv_file_in_the_cwd(
     set_env(monkeypatch)
     assert get_settings().worker_id == "worker-1"
     assert config.Settings.model_config.get("env_file") is None
+
+
+def test_w2_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    set_env(monkeypatch)
+    settings = get_settings()
+    assert settings.max_start_retries == 3
+    assert settings.start_retry_backoff_sec == 5.0
+    assert settings.default_voice == "roberto"

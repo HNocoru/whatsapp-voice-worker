@@ -41,10 +41,12 @@ class HttpAppClient:
         )
 
     async def _request(
-        self, method: str, path: str, *, timeout: float, json: Any = None
+        self, method: str, path: str, *, timeout: float, json: Any = None,
+        max_attempts: int | None = None,
     ) -> httpx.Response:
+        attempts = max_attempts or self._max_attempts
         last: str = "sin intentos"
-        for attempt in range(1, self._max_attempts + 1):
+        for attempt in range(1, attempts + 1):
             try:
                 resp = await self._http.request(method, path, json=json, timeout=timeout)
             except httpx.TransportError as exc:
@@ -53,10 +55,10 @@ class HttpAppClient:
                 if resp.status_code != 429 and resp.status_code < 500:
                     return resp
                 last = f"HTTP {resp.status_code}"
-            if attempt < self._max_attempts:
+            if attempt < attempts:
                 delay = self._backoff_base * 2 ** (attempt - 1)
                 await self._sleep(delay + random.uniform(0, delay / 4))  # noqa: S311
-        msg = f"{method} {path} falló tras {self._max_attempts} intentos ({last})"
+        msg = f"{method} {path} falló tras {attempts} intentos ({last})"
         raise AppClientError(msg)
 
     @staticmethod
@@ -69,7 +71,8 @@ class HttpAppClient:
 
     async def get_context(self, call_id: str) -> dict[str, Any] | None:
         path = f"/api/internal/calls/{call_id}/context"
-        resp = await self._request("GET", path, timeout=self._timeout_context)
+        # Un solo intento: si la app falla se arranca con configuración genérica (contrato).
+        resp = await self._request("GET", path, timeout=self._timeout_context, max_attempts=1)
         if resp.status_code == 404:
             return None
         self._raise_for_client_error(resp, path)

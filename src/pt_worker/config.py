@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     timeout_write_sec: float = 5.0
     heartbeat_interval_sec: int = 30
 
+    # Arranque de Phonic (W2): reintentos tras el primer intento y pausa entre ellos.
+    max_start_retries: int = 3
+    start_retry_backoff_sec: float = 5.0
+    # Voz si la app no manda una válida (roberto | eduardo, docs/02 §7).
+    default_voice: str = "roberto"
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

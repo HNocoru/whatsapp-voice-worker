@@ -26,9 +26,7 @@ def run_lint(project: Path) -> subprocess.CompletedProcess[str]:
 @pytest.fixture
 def sandbox(tmp_path: Path) -> Path:
     """Copia aislada del paquete y su configuración; la violación nunca toca el repo."""
-    shutil.copytree(
-        ROOT / "src", tmp_path / "src", ignore=shutil.ignore_patterns("__pycache__")
-    )
+    shutil.copytree(ROOT / "src", tmp_path / "src", ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copy(ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
     return tmp_path
 

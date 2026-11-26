@@ -1,5 +1,5 @@
 [project]
-name = "pt-worker"
+name = "whatsapp-voice-worker"
 version = "0.1.0"
 description = "Worker de voz del asistente de WhatsApp (Phonic sobre LiveKit)"
 readme = "README.md"
@@ -21,6 +21,9 @@ pt-worker = "pt_worker.main:main"
 [build-system]
 requires = ["uv_build>=0.11.7,<0.14.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "pt_worker"
 
 [dependency-groups]
 dev = [
