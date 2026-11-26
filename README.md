@@ -18,6 +18,32 @@ Worker de voz del asistente de WhatsApp (LiveKit + Phonic). Ver `AGENTS.md` y `d
    despacho/Connector de LiveKit debe apuntar a ese nombre. El `call_id` debe llegar en la metadata
    del job (`{"call_id": "<uuid>"}`) o como atributo `call_id` del participante.
 
+## Probar el audio sin WhatsApp
+
+Lo que se revisó en el paquete instalado (`livekit-agents`, `.venv/lib/python3.12/site-packages/livekit/agents/cli/`):
+
+- `cli.run_app` delega en la CLI legada (`cli.py:435-442` -> `_legacy.run_app`), con subcomandos
+  `console` (`_legacy.py:1671`), `start` (`:1729`), `dev` (`:1788`) y `connect` (`:1852`).
+- **`pt-worker console` NO sirve tal cual.** Usa un job simulado (`fake_job=True`, sala `console-room`,
+  `_legacy.py:1515`) sin participante ni metadata, y el micrófono/altavoz local se acopla a
+  `AgentSession` vía `AgentsConsole`, no a la sala. `handle_job` hace `ctx.wait_for_participant()`
+  (`server.py:38`) y se quedaría esperando; además exige un `call_id`. Faltaría un modo de prueba
+  (call_id fijo y entrada/salida local) que NO está implementado; no se cambió código.
+- **`pt-worker connect --room <sala>`** (`_legacy.py:1852-1925`) entra a una sala real ya existente
+  (la crea si no existe) con `--url/--api-key/--api-secret` (o `LIVEKIT_*`) y `--participant-identity`.
+  `handle_job` sí corre ahí, porque espera a un participante real.
+
+Pasos (sala de prueba; NO VERIFICADO con audio real):
+
+1. Arranca `uv run --env-file <archivo> pt-worker dev` (o `connect --room prueba`).
+2. Entra a la misma sala con un cliente de LiveKit (p. ej. Agents Playground o una página con token) con
+   un atributo de participante `call_id=<uuid>` o despachando el job con metadata `{"call_id": "<uuid>"}`.
+   Sin `call_id` el worker cierra la sala (`missing_call_id`).
+3. Habla y comprueba que Phonic contesta. NO VERIFICADO: el uso de Agents Playground con
+   `agent_name="whatsapp-agent"` (despacho explícito) y que el atributo `call_id` se pueda fijar desde él;
+   la calidad del audio solo se confirma con una llamada real.
+4. La app (`APP_BASE_URL`) debe aceptar ese `call_id`, o apuntar a una app/mock de prueba.
+
 ## Imagen Docker
 
 ```bash
