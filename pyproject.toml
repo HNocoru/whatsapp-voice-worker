@@ -1,0 +1,170 @@
+[project]
+name = "pt-worker"
+version = "0.1.0"
+description = "Worker de voz del asistente de WhatsApp (Phonic sobre LiveKit)"
+readme = "README.md"
+authors = [
+    { name = "HNocoru", email = "jmvillatoro04@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.6.0",
+    "httpx>=0.28.0",
+    "livekit-agents>=1.8,<2",
+    "livekit-plugins-phonic>=1.8,<2",
+]
+
+[project.scripts]
+pt-worker = "pt_worker.main:main"
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "import-linter>=1.0",
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.16.8",
+]
+
+[tool.uv]
+default-groups = ["dev"]
+
+# reference/ es solo lectura: queda fuera de ruff, mypy, pytest e import-linter (solo se
+# analiza src/pt_worker) y, al no estar bajo src/, fuera del paquete.
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["reference", "*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S603"]  # assert y subprocess son normales en pruebas
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+strict = true
+exclude = ["reference/"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+norecursedirs = ["reference"]
+
+[tool.importlinter]
+root_package = "pt_worker"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+id = "domain-solo-stdlib"
+name = "R1: */domain no importa nada fuera de stdlib"
+type = "forbidden"
+source_modules = ["pt_worker.call_bridge.domain"]
+forbidden_modules = [
+    "pt_worker.app_client",
+    "pt_worker.config",
+    "pt_worker.main",
+    "httpx",
+    "livekit",
+    "phonic",
+    "pydantic",
+    "pydantic_settings",
+]
+
+[[tool.importlinter.contracts]]
+id = "application-sin-infraestructura"
+name = "R2: */application no importa infrastructure, livekit, phonic ni httpx"
+type = "forbidden"
+source_modules = [
+    "pt_worker.call_bridge.application",
+    "pt_worker.call_events.application",
+    "pt_worker.tool_calling.application",
+]
+forbidden_modules = [
+    "pt_worker.call_bridge.infrastructure",
+    "pt_worker.call_events.infrastructure",
+    "pt_worker.tool_calling.infrastructure",
+    "livekit",
+    "phonic",
+    "httpx",
+]
+
+[[tool.importlinter.contracts]]
+id = "livekit-phonic-solo-call-bridge-infra"
+name = "R3: livekit y phonic solo en call_bridge/infrastructure"
+type = "forbidden"
+source_modules = [
+    "pt_worker.call_bridge.domain",
+    "pt_worker.call_bridge.application",
+    "pt_worker.call_events",
+    "pt_worker.tool_calling",
+    "pt_worker.health",
+    "pt_worker.app_client",
+    "pt_worker.config",
+    "pt_worker.main",
+]
+forbidden_modules = ["livekit", "phonic"]
+allow_indirect_imports = true  # main.py puede componer adaptadores; solo se prohíbe el import directo
+
+[[tool.importlinter.contracts]]
+id = "httpx-solo-app-client"
+name = "R4: httpx solo en app_client"
+type = "forbidden"
+source_modules = [
+    "pt_worker.call_bridge",
+    "pt_worker.call_events",
+    "pt_worker.tool_calling",
+    "pt_worker.health",
+    "pt_worker.config",
+    "pt_worker.main",
+]
+forbidden_modules = ["httpx"]
+allow_indirect_imports = true
+
+[[tool.importlinter.contracts]]
+id = "servicios-independientes"
+name = "R5: los servicios no se importan entre sí (solo main.py los conecta)"
+type = "independence"
+modules = [
+    "pt_worker.call_bridge",
+    "pt_worker.call_events",
+    "pt_worker.tool_calling",
+    "pt_worker.health",
+]
+
+[[tool.importlinter.contracts]]
+id = "app-client-y-config-hojas"
+name = "R5b: app_client y config no dependen de los servicios ni de main"
+type = "forbidden"
+source_modules = ["pt_worker.app_client", "pt_worker.config"]
+forbidden_modules = [
+    "pt_worker.call_bridge",
+    "pt_worker.call_events",
+    "pt_worker.tool_calling",
+    "pt_worker.health",
+    "pt_worker.main",
+]
+
+[[tool.importlinter.contracts]]
+id = "capas-hexagonales"
+name = "Hexagonal: infrastructure -> application -> domain dentro de cada servicio"
+type = "layers"
+containers = [
+    "pt_worker.call_bridge",
+    "pt_worker.call_events",
+    "pt_worker.tool_calling",
+]
+layers = [
+    "infrastructure",
+    "application",
+    "(domain)",
+]

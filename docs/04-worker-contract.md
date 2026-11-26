@@ -1,0 +1,98 @@
+# 04 · Contrato HTTP entre la app y el worker de voz
+
+**Este archivo existe idéntico en los dos repos** (`prueba-tecnic/docs/04-worker-contract.md` y
+`pt-worker/docs/04-worker-contract.md`). Si cambia, se cambia en los dos en el mismo día y se anota
+en `DECISIONS.md` de ambos.
+
+Estado: **Propuesta v0**. Se implementa en el slice 02 (llamada contestada) y se completa en el 04.
+
+## Principio
+
+- La **app** es la única dueña de los datos (Supabase). El **worker** no tiene credenciales de base.
+- El worker pide al iniciar la llamada y guarda durante y al terminar, siempre por HTTP a la app.
+- La memoria del contacto y la configuración del negocio **no vienen de WhatsApp**: viven en la app.
+
+## Autenticación
+
+- Header `Authorization: Bearer <WORKER_API_TOKEN>`; el mismo secreto en ambos lados, solo en variables
+  de entorno. Comparación en tiempo constante en la app.
+- Rutas bajo `/api/internal/*`. Devuelven 401 sin token válido y nunca se llaman desde el navegador.
+- Mejora posible (no ahora): firma HMAC del cuerpo con timestamp.
+
+## Identificadores
+
+- `call_id`: UUID de la fila `calls` que crea la app al recibir el webhook `calls/connect`.
+  Viaja al worker como atributo del participante o metadata del job de LiveKit (**Por verificar**
+  en slice 02: cómo exactamente lo expone el Connector de WhatsApp).
+- El worker nunca recibe ni envía `tenant_id`: la app lo deduce del `call_id`.
+
+## Endpoints
+
+### 1. `GET /api/internal/calls/{call_id}/context`
+Lo llama el worker **antes** de abrir la sesión con Phonic. Presupuesto: p95 < 800 ms.
+
+Respuesta 200:
+```json
+{
+  "call_id": "uuid",
+  "business": {
+    "name": "string",
+    "tone": "string",
+    "faq": "string",
+    "hours": "string",
+    "voice": "roberto | eduardo",
+    "language": "es"
+  },
+  "contact": { "display_name": "string | null", "is_new": true },
+  "memory": { "summary": "string", "facts": {} },
+  "recent_turns": [{ "role": "user | assistant", "channel": "text | voice", "text": "string", "at": "ISO-8601" }],
+  "limits": { "max_call_seconds": 300, "goodbye_at_seconds": 270 }
+}
+```
+Errores: 404 si `call_id` no existe; 409 si la llamada ya terminó. Si falla o tarda, el worker sigue
+con una configuración base genérica (la llamada no se cae por esto).
+
+### 2. `POST /api/internal/calls/{call_id}/turns`
+Turnos de transcripción, **incrementales** (para no perderlos si la llamada se corta). Lotes pequeños.
+```json
+{ "turns": [{ "seq": 1, "role": "user | assistant", "text": "string", "started_ms": 1234 }] }
+```
+Idempotente por `(call_id, seq)`: reenviar el mismo `seq` no duplica. Respuesta 204.
+
+### 3. `POST /api/internal/calls/{call_id}/end`
+Al terminar la llamada.
+```json
+{
+  "ended_reason": "completed | caller_hangup | time_limit | failed",
+  "answered_at": "ISO-8601 | null",
+  "ended_at": "ISO-8601",
+  "duration_sec": 123,
+  "error": "string | null"
+}
+```
+La app genera el **resumen** con su LLM de texto y actualiza `contact_memory`. Idempotente: un segundo
+`end` del mismo `call_id` responde 200 sin cambios. `missed` lo marca la app (llamada no contestada),
+no el worker.
+
+### 4. `POST /api/internal/tools/{name}`
+Herramientas que el agente de voz invoca durante la llamada (slice 10, opcional).
+```json
+{ "call_id": "uuid", "arguments": {} }
+```
+Respuesta: `{ "ok": true, "result": {} }` o `{ "ok": false, "error": "string" }`. Presupuesto p95 < 800 ms.
+Herramientas previstas: `check_availability`, `book_appointment`, `request_human`.
+
+### 5. `POST /api/internal/workers/heartbeat`
+Cada 30 s. `{ "worker_id": "string", "active_calls": 0, "version": "string" }`. Alimenta el indicador
+de salud del dashboard. Respuesta 204.
+
+## Reglas de fallo en el worker
+
+- Timeout por petición: 3 s (context y tools), 5 s (turns y end).
+- Reintento con backoff y jitter solo ante 5xx, 429 o error de red; nunca ante 4xx.
+- `turns` y `end` se encolan en memoria del proceso y se reintentan hasta 2 min después de colgar.
+- Ningún error de la app tumba una llamada en curso.
+
+## Pendiente de decidir
+- Si `end` también recibe la transcripción completa como respaldo (hoy: no; se arma con `turns`).
+- Versionado del contrato: por ahora `v0` implícito; si cambia de forma incompatible, prefijo `/v1/`.
