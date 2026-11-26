@@ -190,7 +190,7 @@ async def _supervise(engine: VoiceEngine, services: CallServices, call: Call) ->
         if hangup.done():
             return hangup.result()
         # El temporizador venció: se corta siempre, aunque despierte una pizca antes del límite.
-        await engine.hangup()  # corte duro
+        await _hard_cut(engine, services)
         return EndReason.TIME_LIMIT
     finally:
         for task in (timer, hangup):
@@ -200,6 +200,24 @@ async def _supervise(engine: VoiceEngine, services: CallServices, call: Call) ->
             if task is not None:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
+
+
+HANGUP_ATTEMPTS = 3  # el corte duro se reintenta de forma acotada si LiveKit falla un momento
+HANGUP_RETRY_SEC = 1.0
+
+
+async def _hard_cut(engine: VoiceEngine, services: CallServices) -> None:
+    """Cuelga la sala al vencer el tope; un fallo al colgar no cambia el motivo (`time_limit`)."""
+    for attempt in range(1, HANGUP_ATTEMPTS + 1):
+        try:
+            await engine.hangup()
+            return
+        except Exception as exc:  # noqa: BLE001 - el motivo del cierre sigue siendo time_limit
+            logger.warning(
+                "falló el corte duro (%d/%d): %s", attempt, HANGUP_ATTEMPTS, type(exc).__name__
+            )
+            if attempt < HANGUP_ATTEMPTS:
+                await services.sleep(HANGUP_RETRY_SEC)
 
 
 async def report_start_failure(

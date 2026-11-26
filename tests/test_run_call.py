@@ -30,7 +30,9 @@ class FakeEngine:
         hangup: EndReason | None = EndReason.COMPLETED,
         script: list[tuple[str, str]] | None = None,
         start_failures: int = 0,
+        hangup_failures: int = 0,
     ) -> None:
+        self._hangup_failures = hangup_failures
         self.started: list[dict[str, Any]] = []
         self.start_attempts = 0
         self.goodbyes: list[float] = []
@@ -64,6 +66,9 @@ class FakeEngine:
 
     async def hangup(self) -> None:
         self.hangups += 1
+        if self.hangups <= self._hangup_failures:
+            msg = "LiveKit no respondió"
+            raise RuntimeError(msg)
 
 
 class FakeSleep:
@@ -294,6 +299,32 @@ async def test_timer_waking_exactly_at_the_limit_still_cuts_and_hangs_up() -> No
         reason = await run_call(CALL_ID, engine, services)
     assert reason is EndReason.TIME_LIMIT
     assert engine.hangups == 1
+    assert app.ends[CALL_ID]["ended_reason"] == "time_limit"
+
+
+async def test_hard_cut_reports_time_limit_even_if_hangup_fails_and_retries_it() -> None:
+    # R4-001 de la revisión: si delete_room falla justo en el corte, la llamada no debe quedar
+    # abierta ni registrarse como `failed`: se reintenta el corte y el motivo sigue siendo
+    # time_limit.
+    app, clock = FakeAppClient(), FakeClock()
+    engine = FakeEngine(hangup=None, hangup_failures=2)
+    engine.clock = clock
+    async with asyncio.timeout(3):
+        reason = await run_call(CALL_ID, engine, make(app, clock))
+    assert reason is EndReason.TIME_LIMIT
+    assert engine.hangups == 3  # dos fallos y un tercer intento que sí cuelga
+    assert app.ends[CALL_ID]["ended_reason"] == "time_limit"
+    assert app.ends[CALL_ID]["error"] is None
+
+
+async def test_hard_cut_gives_up_after_bounded_attempts_but_still_reports_time_limit() -> None:
+    app, clock = FakeAppClient(), FakeClock()
+    engine = FakeEngine(hangup=None, hangup_failures=99)
+    engine.clock = clock
+    async with asyncio.timeout(3):
+        reason = await run_call(CALL_ID, engine, make(app, clock))
+    assert reason is EndReason.TIME_LIMIT
+    assert engine.hangups == 3  # acotado: no reintenta sin fin
     assert app.ends[CALL_ID]["ended_reason"] == "time_limit"
 
 
