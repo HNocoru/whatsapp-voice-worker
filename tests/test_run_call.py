@@ -638,13 +638,18 @@ def test_non_farewell_is_not_detected(text: str) -> None:
     assert not is_farewell(text)
 
 
+short_sleeps: list[float] = []
+
+
 def _farewell_services(app: FakeAppClient, clock: FakeClock) -> CallServices:
     """Servicios con `sleep` corto que avanza el reloj; los temporizadores del tope no vencen."""
     base = make(app, clock)
+    short_sleeps.clear()
 
     async def sleep(seconds: float) -> None:
         if seconds > 100:
             await asyncio.Event().wait()
+        short_sleeps.append(seconds)
         clock.advance(seconds)
 
     return replace(base, sleep=sleep)
@@ -660,6 +665,7 @@ async def test_customer_farewell_hangs_up_once_and_reports_completed() -> None:
     assert reason is EndReason.COMPLETED
     assert engine.hangups == 1
     assert app.ends[CALL_ID]["ended_reason"] == "completed"
+    assert 4.0 in short_sleeps  # margen para que termine de sonar la despedida
 
 
 async def test_question_after_thanks_does_not_hang_up() -> None:

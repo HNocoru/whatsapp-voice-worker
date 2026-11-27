@@ -279,7 +279,7 @@ async def _supervise(
         if hangup.done():
             return hangup.result(), None
         if farewell_wait is not None and farewell_wait.done():
-            return await _hang_up_after_farewell(engine, services)
+            return await _hang_up_after_farewell(engine, services, hangup)
 
         if call.should_say_goodbye(now()):
             call.begin_ending()
@@ -296,7 +296,7 @@ async def _supervise(
         if hangup.done():
             return hangup.result(), None
         if farewell_wait is not None and farewell_wait.done():
-            return await _hang_up_after_farewell(engine, services)
+            return await _hang_up_after_farewell(engine, services, hangup)
         # El temporizador venció: se corta siempre, aunque despierte una pizca antes del límite.
         if await _hang_up(engine, services):
             return EndReason.TIME_LIMIT, None
@@ -318,14 +318,28 @@ async def _wait_first(*futures: asyncio.Future[Any] | None) -> None:
 
 
 async def _hang_up_after_farewell(
-    engine: VoiceEngine, services: CallServices
+    engine: VoiceEngine, services: CallServices, hangup: asyncio.Future[EndReason]
 ) -> tuple[EndReason, str | None]:
-    """El cliente se despidió y el asistente ya contestó: se cuelga y se cierra como `completed`."""
+    """El cliente se despidió y el asistente ya contestó: tras un margen, se cuelga (`completed`).
+
+    El margen deja terminar de sonar la despedida; si el cliente cuelga antes, manda su motivo.
+    """
+    margin = asyncio.ensure_future(services.sleep(FAREWELL_MARGIN_SEC))
+    try:
+        await _wait_first(hangup, margin)
+        if hangup.done():
+            return hangup.result(), None
+    finally:
+        if not margin.done():
+            margin.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await margin
     if await _hang_up(engine, services):
         return EndReason.COMPLETED, None
     return EndReason.COMPLETED, HANGUP_FAILED
 
 
+FAREWELL_MARGIN_SEC = 4.0  # espera tras la despedida antes de colgar
 DRAIN_TIMEOUT_SEC = 2.0  # tope de espera de los envíos de turnos antes de publicar `end`
 HANGUP_ATTEMPTS = 3  # el corte duro se reintenta de forma acotada si LiveKit falla un momento
 HANGUP_RETRY_SEC = 1.0
