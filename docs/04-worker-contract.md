@@ -90,7 +90,7 @@ Acordado 2026-11-27 (replicar idéntico en prueba-tecnic):
 
 Acordado 2026-11-27 (replicar idéntico en prueba-tecnic):
 - `error="no_participant"` con `ended_reason` `failed` y `answered_at` null significa que el llamante
-  nunca entró a la sala en el tiempo límite (60 s por defecto). `duration_sec` es 0.
+  nunca entró a la sala en el tiempo límite (30 s por defecto). `duration_sec` es 0.
 
 La app genera el **resumen** con su LLM de texto y actualiza `contact_memory`. Idempotente: un segundo
 `end` del mismo `call_id` responde 200 sin cambios. `missed` lo marca la app (llamada no contestada),

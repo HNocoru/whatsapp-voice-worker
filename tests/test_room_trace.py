@@ -9,8 +9,12 @@ from typing import Any
 import pytest
 
 from pt_worker.app_client.fake import FakeAppClient
+from pt_worker.call_bridge.application.run_call import CallServices
+from pt_worker.call_bridge.infrastructure.app_context import AppContextSource
 from pt_worker.call_bridge.infrastructure.livekit import room_trace
 from pt_worker.call_bridge.infrastructure.livekit.server import handle_job
+from pt_worker.call_events.application import TurnBuffer
+from pt_worker.call_events.infrastructure import HttpCallEventSink
 from tests.fakes import FakeClock
 from tests.test_run_call import FakeCtx, make
 
@@ -238,4 +242,112 @@ async def test_wait_timeout_shutdown_runs_even_if_delete_room_raises() -> None:
         participant_timeout_sec=0.05,
         trace_interval=0.01,
     )
+    assert ctx.shutdowns == ["no_participant"]
+
+
+# --- F15 (H1/H2): el slot se libera aunque la app esté caída ----------------------------------
+def _services_with_real_sleep(app: FakeAppClient) -> CallServices:
+    """Servicios cuyo reintento duerme de verdad (poco) y mide con reloj real: la ventana de
+    120 s no termina sola, así que solo el tope acotado de `end` puede cortarla."""
+    import time
+
+    async def sleep(seconds: float) -> None:
+        await asyncio.sleep(min(seconds, 0.01))
+
+    buffer = TurnBuffer(HttpCallEventSink(app), sleep=sleep, now=time.monotonic)
+    return CallServices(
+        context_source=AppContextSource(app),
+        events=buffer,
+        clock=FakeClock(),
+        close=app.aclose,
+        sleep=sleep,
+    )
+
+
+async def test_wait_timeout_with_app_down_frees_slot_quickly_and_deletes_room_first() -> None:
+    import json
+    import time
+
+    from tests.test_run_call import CALL_ID
+
+    app = FakeAppClient()
+    app.fail_next = 10_000  # app caída: publish_end entraría en su ventana de reintentos (120 s)
+    order: list[str] = []
+    ctx: Any = FakeCtx(json.dumps({"call_id": CALL_ID}))
+    ctx.room = FakeRoom()
+    real_delete = ctx.delete_room
+    real_post_end = app.post_end
+
+    async def delete_room() -> None:
+        order.append("delete_room")
+        await real_delete()
+
+    async def post_end(call_id: str, payload: dict[str, Any]) -> None:
+        order.append("post_end")
+        await real_post_end(call_id, payload)
+
+    ctx.delete_room = delete_room
+    app.post_end = post_end  # type: ignore[method-assign]
+    started = time.monotonic()
+    # sleep real: el reintento de la ventana de 120 s solo se corta por el tope acotado
+    await asyncio.wait_for(
+        handle_job(
+            ctx,
+            lambda: _services_with_real_sleep(app),
+            _no_engine,
+            wait=_never,
+            participant_timeout_sec=0.05,
+            no_participant_end_timeout_sec=0.05,
+            trace_interval=0.01,
+        ),
+        timeout=3,
+    )
+    assert time.monotonic() - started < 1.0
+    assert order[0] == "delete_room"
+    assert ctx.deleted == 1
+    assert ctx.shutdowns == ["no_participant"]
+    assert CALL_ID not in app.ends
+
+
+async def test_wait_timeout_shutdown_raising_does_not_break_handle_job() -> None:
+    ctx: Any = FakeCtx("{}")
+    ctx.room = FakeRoom()
+    calls: list[str] = []
+
+    def shutdown(reason: str = "") -> None:
+        calls.append(reason)
+        raise RuntimeError("x")
+
+    ctx.shutdown = shutdown
+    await handle_job(
+        ctx,
+        lambda: make(FakeAppClient(), FakeClock()),
+        _no_engine,
+        wait=_never,
+        participant_timeout_sec=0.05,
+        trace_interval=0.01,
+    )
+    assert calls == ["no_participant"]
+
+
+async def test_wait_timeout_with_failing_services_factory_still_closes_room() -> None:
+    import json
+
+    from tests.test_run_call import CALL_ID
+
+    ctx: Any = FakeCtx(json.dumps({"call_id": CALL_ID}))
+    ctx.room = FakeRoom()
+
+    def broken_factory() -> Any:
+        raise RuntimeError("sin servicios")
+
+    await handle_job(
+        ctx,
+        broken_factory,
+        _no_engine,
+        wait=_never,
+        participant_timeout_sec=0.05,
+        trace_interval=0.01,
+    )
+    assert ctx.deleted == 1
     assert ctx.shutdowns == ["no_participant"]

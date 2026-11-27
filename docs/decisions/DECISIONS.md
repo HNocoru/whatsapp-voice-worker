@@ -170,9 +170,12 @@ Correcciones tras la verificación independiente (W2):
 - El contrato (`04-worker-contract.md`) se actualizó con lo acordado; debe replicarse idéntico en
   prueba-tecnic. Hallazgos en `docs/integration-findings.md`.
 - `main.py` ya no solo valida la configuración (corregida la deuda obsoleta de W0).
-- Tope de 60 s a `wait_for_participant` (F15, `PARTICIPANT_TIMEOUT_SEC`): al vencer, `end` `failed` con
+- Tope de 30 s a `wait_for_participant` (F15, `PARTICIPANT_TIMEOUT_SEC`): al vencer, `end` `failed` con
   `error="no_participant"` y `answered_at` null (si el `call_id` viene en la metadata del job), se cierra
-  la sala y se libera el slot.
+  la sala y se libera el slot. 30 s (no 60): la ventana de aceptación de Meta es ~30-60 s y el job ya
+  se despachó cuando terminó el accept, así que 30 s tras `connect` bastan para que entre el Connector.
+  Orden del cierre: delete_room, `end` acotado a 20 s (con la app caída su reintento tardaría 120 s y
+  retendría el slot; si no se entrega se registra como perdido), `shutdown` siempre, cierre de servicios.
 
 ## Deudas
 - `pip-audit` (listado en el roadmap de W0) no se agregó; decidir si entra en el CI de W1.

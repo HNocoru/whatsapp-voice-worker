@@ -36,7 +36,8 @@ from pt_worker.call_bridge.infrastructure.livekit.voice_engine import LiveKitVoi
 logger = logging.getLogger(__name__)
 
 NO_PARTICIPANT = "no_participant"  # texto fijo para `error` y el motivo de shutdown
-PARTICIPANT_TIMEOUT_SEC = 60.0  # tope a la espera del participante (F15)
+PARTICIPANT_TIMEOUT_SEC = 30.0  # tope a la espera del participante (F15)
+NO_PARTICIPANT_END_TIMEOUT_SEC = 20.0  # tope a `end` sin participante (libera el slot)
 AGENT_NAME = "whatsapp-agent"  # despacho explícito: el Connector/regla de despacho usa este nombre
 
 
@@ -57,6 +58,7 @@ async def handle_job(
     trace_duration: float = DEFAULT_DURATION_S,
     wait: Callable[[JobContext], Awaitable[Any]] = _default_wait,
     participant_timeout_sec: float = PARTICIPANT_TIMEOUT_SEC,
+    no_participant_end_timeout_sec: float = NO_PARTICIPANT_END_TIMEOUT_SEC,
 ) -> None:
     """Atiende una sala: espera al participante, resuelve el call_id y corre la llamada.
 
@@ -77,7 +79,13 @@ async def handle_job(
     )
     try:
         await _run_job(
-            ctx, services_factory, engine_factory, wait, started, participant_timeout_sec
+            ctx,
+            services_factory,
+            engine_factory,
+            wait,
+            started,
+            participant_timeout_sec,
+            no_participant_end_timeout_sec,
         )
     finally:
         trace_task.cancel()
@@ -92,6 +100,7 @@ async def _run_job(
     wait: Callable[[JobContext], Awaitable[Any]],
     started: float,
     participant_timeout_sec: float,
+    end_timeout_sec: float,
 ) -> None:
     try:
         async with asyncio.timeout(participant_timeout_sec) as limit:
@@ -99,7 +108,9 @@ async def _run_job(
     except TimeoutError:
         if not limit.expired():
             raise  # un TimeoutError propio de la espera sigue propagándose igual que antes
-        await _close_without_participant(ctx, services_factory, participant_timeout_sec)
+        await _close_without_participant(
+            ctx, services_factory, participant_timeout_sec, end_timeout_sec
+        )
         return
     try:
         call_id = resolve_call_id(ctx.job.metadata, participant.attributes)
@@ -132,9 +143,16 @@ async def _close_without_participant(
     ctx: JobContext,
     services_factory: Callable[[], CallServices],
     timeout_sec: float,
+    end_timeout_sec: float,
 ) -> None:
-    """El llamante nunca entró: informa `end` failed (si hay call_id), cierra la sala. No lanza."""
+    """El llamante nunca entró: cierra la sala, informa `end` failed (acotado) y libera el slot.
+
+    Orden: 1) delete_room, 2) `end` con tope (con la app caída su ventana de reintento sería de
+    120 s y retendría el slot), 3) shutdown siempre, 4) cierre de servicios. No lanza.
+    """
     logger.warning("TimeoutError: ningún participante entró a la sala en %.1f s", timeout_sec)
+    with contextlib.suppress(Exception):
+        await ctx.delete_room()
     services: CallServices | None = None
     try:
         try:
@@ -143,19 +161,26 @@ async def _close_without_participant(
             logger.error("sin participante y sin call_id en el despacho: no hay dónde publicar end")
         else:
             services = services_factory()
-            await report_start_failure(
-                call_id,
-                TimeoutError(),
-                services,
-                error=NO_PARTICIPANT,
-                answered=False,
-            )
-    except Exception as exc:  # noqa: BLE001 - el cierre de la sala debe correr igual
+            try:
+                async with asyncio.timeout(end_timeout_sec):
+                    await report_start_failure(
+                        call_id,
+                        TimeoutError(),
+                        services,
+                        error=NO_PARTICIPANT,
+                        answered=False,
+                    )
+            except TimeoutError:
+                logger.error(
+                    "end perdido: la app no lo recibió en %.1f s (call_id=%s)",
+                    end_timeout_sec,
+                    call_id,
+                )
+    except Exception as exc:  # noqa: BLE001 - el shutdown debe correr igual
         logger.error("no se pudo informar la llamada sin participante: %s", type(exc).__name__)
     finally:
         with contextlib.suppress(Exception):
-            await ctx.delete_room()
-        ctx.shutdown(reason=NO_PARTICIPANT)
+            ctx.shutdown(reason=NO_PARTICIPANT)
         if services is not None:
             with contextlib.suppress(Exception):
                 await services.close()

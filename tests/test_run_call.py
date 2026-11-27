@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import Any
 
 import pytest
@@ -409,6 +410,9 @@ async def test_start_failure_retries_hangup_and_still_publishes_failed() -> None
     assert reason is EndReason.FAILED
     assert engine.hangups == 3  # dos fallos y un tercer intento que sí cuelga
     assert app.ends[CALL_ID]["ended_reason"] == "failed"
+    # arranque fallido con valores por defecto: sí se contestó (answered_at ISO) y error = excepción
+    datetime.fromisoformat(app.ends[CALL_ID]["answered_at"])
+    assert app.ends[CALL_ID]["error"] == "ConnectionError"
 
 
 async def test_start_failure_with_hanging_hangup_still_publishes_failed() -> None:

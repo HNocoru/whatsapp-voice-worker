@@ -41,6 +41,10 @@ conector no entró a ESTA sala (puede ser un accept fallido, un despacho a otra 
 cruza con el log de la app y el dashboard de LiveKit); si aparece pero tarde, mira `t` frente a `wait_done`.
 De atributos solo se registran las claves, nunca los valores.
 
+Tope de espera (F15): si nadie entra en 30 s (`PARTICIPANT_TIMEOUT_SEC`) se cierra la sala, se intenta
+publicar `end` `failed`/`no_participant` (máx. 20 s, para no retener el slot si la app está caída) y se
+cierra el job.
+
 Pasos (sala de prueba; NO VERIFICADO con audio real):
 
 1. Arranca `uv run --env-file <archivo> pt-worker dev` (o `connect --room prueba`).
