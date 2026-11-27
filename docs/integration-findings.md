@@ -18,3 +18,4 @@ Revisión del contrato `04-worker-contract.md` con la sesión de la app. Evidenc
 | F12 | DECISIONS.md decía que `main` solo valida la configuración | worker | corregido | `docs/decisions/DECISIONS.md` (Deudas) |
 
 | F13 | La app aún no tiene `UNIQUE(call_id, position)`; hoy filtra seq ya guardados y no cubre peticiones simultáneas | app | migración acordada para su siguiente tanda (ver F2) | respuesta de la app, 2026-11-27 |
+| F14 | Participante CONNECTOR no llega a la sala tras AcceptWhatsAppCall (reporte del intento real); trazado agregado en el worker; causa pendiente | worker + app | investigando | `src/pt_worker/call_bridge/infrastructure/livekit/room_trace.py` |

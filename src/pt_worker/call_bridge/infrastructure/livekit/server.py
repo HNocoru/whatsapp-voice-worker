@@ -7,16 +7,26 @@ poder serializarse (LiveKit corre cada sala en otro proceso): por eso `register`
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
-from collections.abc import Callable
+import time
+from collections.abc import Awaitable, Callable
 from functools import partial
+from typing import Any
 
 from livekit.agents import AgentServer, JobContext, cli
 
 from pt_worker.call_bridge.application.call_id import MissingCallIdError, resolve_call_id
 from pt_worker.call_bridge.application.ports import VoiceEngine
 from pt_worker.call_bridge.application.run_call import CallServices, run_call
+from pt_worker.call_bridge.infrastructure.livekit.room_trace import (
+    DEFAULT_DURATION_S,
+    DEFAULT_INTERVAL_S,
+    log_job_start,
+    trace_room,
+    traced_wait,
+)
 from pt_worker.call_bridge.infrastructure.livekit.voice_engine import LiveKitVoiceEngine
 
 logger = logging.getLogger(__name__)
@@ -28,14 +38,52 @@ def _livekit_engine(ctx: JobContext, identity: str) -> VoiceEngine:
     return LiveKitVoiceEngine(ctx, identity)
 
 
+async def _default_wait(ctx: JobContext) -> Any:
+    return await ctx.wait_for_participant()
+
+
 async def handle_job(
     ctx: JobContext,
     services_factory: Callable[[], CallServices],
     engine_factory: Callable[[JobContext, str], VoiceEngine] = _livekit_engine,
+    *,
+    trace_interval: float = DEFAULT_INTERVAL_S,
+    trace_duration: float = DEFAULT_DURATION_S,
+    wait: Callable[[JobContext], Awaitable[Any]] = _default_wait,
 ) -> None:
-    """Atiende una sala: espera al participante, resuelve el call_id y corre la llamada."""
+    """Atiende una sala: espera al participante, resuelve el call_id y corre la llamada.
+
+    El trazado (`room_trace`) es solo diagnóstico: la espera sigue siendo `wait_for_participant`.
+    """
+    started = time.monotonic()
+    log_job_start(ctx, started, phase="start")
     await ctx.connect()
-    participant = await ctx.wait_for_participant()
+    log_job_start(ctx, started, phase="connected")
+    trace_task = asyncio.create_task(
+        trace_room(
+            getattr(ctx, "room", None),
+            started=started,
+            interval=trace_interval,
+            duration=trace_duration,
+        ),
+        name="trace_room",
+    )
+    try:
+        await _run_job(ctx, services_factory, engine_factory, wait, started)
+    finally:
+        trace_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await trace_task
+
+
+async def _run_job(
+    ctx: JobContext,
+    services_factory: Callable[[], CallServices],
+    engine_factory: Callable[[JobContext, str], VoiceEngine],
+    wait: Callable[[JobContext], Awaitable[Any]],
+    started: float,
+) -> None:
+    participant = await traced_wait(ctx, wait, started=started)
     try:
         call_id = resolve_call_id(ctx.job.metadata, participant.attributes)
     except MissingCallIdError as exc:

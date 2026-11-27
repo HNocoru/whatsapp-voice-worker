@@ -27,11 +27,18 @@ Lo que se revisó en el paquete instalado (`livekit-agents`, `.venv/lib/python3.
 - **`pt-worker console` NO sirve tal cual.** Usa un job simulado (`fake_job=True`, sala `console-room`,
   `_legacy.py:1515`) sin participante ni metadata, y el micrófono/altavoz local se acopla a
   `AgentSession` vía `AgentsConsole`, no a la sala. `handle_job` hace `ctx.wait_for_participant()`
-  (`server.py:38`) y se quedaría esperando; además exige un `call_id`. Faltaría un modo de prueba
+  (`server.py`) y se quedaría esperando; además exige un `call_id`. Faltaría un modo de prueba
   (call_id fijo y entrada/salida local) que NO está implementado; no se cambió código.
 - **`pt-worker connect --room <sala>`** (`_legacy.py:1852-1925`) entra a una sala real ya existente
   (la crea si no existe) con `--url/--api-key/--api-secret` (o `LIVEKIT_*`) y `--participant-identity`.
   `handle_job` sí corre ahí, porque espera a un participante real.
+
+Trazado de la sala (diagnóstico, `room_trace.py`): tras conectar, el worker registra en INFO líneas
+`room_trace t=<s> remote=<n> identity=... kind=... state=...` cada 2 s durante 30 s, y `wait_start` /
+`wait_done` (o `wait_failed`) alrededor de `wait_for_participant()`. Busca `kind=PARTICIPANT_KIND_CONNECTOR`
+(`kind_details=['PARTICIPANT_KIND_DETAIL_CONNECTOR_WHATSAPP']`): si `remote=0` en todas las líneas, el
+conector nunca entró (problema del accept/despacho); si aparece pero tarde, mira `t` frente a `wait_done`.
+De atributos solo se registran las claves, nunca los valores.
 
 Pasos (sala de prueba; NO VERIFICADO con audio real):
 
