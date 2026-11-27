@@ -601,3 +601,78 @@ async def test_snapshot_check_failing_for_other_reasons_does_not_affect_the_call
     reason = await run_call(CALL_ID, FakeEngine(), services, snapshot=SNAPSHOT)
     assert reason is EndReason.COMPLETED
     assert app.ends[CALL_ID]["ended_reason"] == "completed"
+
+
+# --- despedida del cliente: el asistente cuelga solo ----------------------------------------------
+
+from pt_worker.call_bridge.application.farewell import is_farewell  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Adiós",
+        "ya, hasta luego",
+        "gracias, es todo",
+        "Ya es todo",
+        "no, nada más",
+        "Bye!",
+        "adiós.",
+    ],
+)
+def test_farewell_phrases_are_detected(text: str) -> None:
+    assert is_farewell(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "gracias",
+        "gracias, ¿y a qué hora abren?",
+        "quiero saber nada más el precio",
+        "no quiero decir adiós todavía pero dime el horario de mañana",
+        "",
+    ],
+)
+def test_non_farewell_is_not_detected(text: str) -> None:
+    assert not is_farewell(text)
+
+
+def _farewell_services(app: FakeAppClient, clock: FakeClock) -> CallServices:
+    """Servicios con `sleep` corto que avanza el reloj; los temporizadores del tope no vencen."""
+    base = make(app, clock)
+
+    async def sleep(seconds: float) -> None:
+        if seconds > 100:
+            await asyncio.Event().wait()
+        clock.advance(seconds)
+
+    return replace(base, sleep=sleep)
+
+
+async def test_customer_farewell_hangs_up_once_and_reports_completed() -> None:
+    app, clock = FakeAppClient(), FakeClock()
+    engine = FakeEngine(
+        hangup=None,
+        script=[("user", "gracias, es todo"), ("assistant", "Con gusto, hasta luego")],
+    )
+    reason = await run_call(CALL_ID, engine, _farewell_services(app, clock))
+    assert reason is EndReason.COMPLETED
+    assert engine.hangups == 1
+    assert app.ends[CALL_ID]["ended_reason"] == "completed"
+
+
+async def test_question_after_thanks_does_not_hang_up() -> None:
+    app, clock = FakeAppClient(), FakeClock()
+    engine = FakeEngine(
+        hangup=None,
+        script=[
+            ("user", "gracias"),
+            ("assistant", "Con gusto, ¿algo más?"),
+            ("user", "una cosa más, ¿abren el domingo?"),
+            ("assistant", "Sí, de 9 a 18 h"),
+        ],
+    )
+    reason = await run_call(CALL_ID, engine, make(app, clock))
+    assert reason is EndReason.TIME_LIMIT  # solo el tope de 300 s corta
+    assert engine.goodbyes  # la despedida de las 270 s sigue funcionando

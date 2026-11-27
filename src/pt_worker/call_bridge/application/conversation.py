@@ -25,6 +25,10 @@ GENERIC_INSTRUCTIONS = (
     "Habla en español de México, con frases cortas y amables. Si no sabes algo del negocio, "
     "dilo con honestidad y ofrece que una persona le dé seguimiento."
 )
+FAREWELL_NOTE = (
+    "Si la persona se despide o dice que no necesita nada más, despídete en una frase breve y "
+    "no abras temas nuevos. Si aún pregunta algo, respóndelo."
+)
 GOODBYE_INSTRUCTIONS = (
     "La llamada está por terminar por tiempo. Despídete en una o dos frases cortas, "
     "agradece la llamada y no abras temas nuevos."
@@ -57,7 +61,7 @@ def build_conversation(context: dict[str, Any] | None, default_voice: str) -> Co
     contact_name = _text(contact.get("display_name"))
     is_new = contact.get("is_new") is True
 
-    parts = [GENERIC_INSTRUCTIONS]
+    parts = [GENERIC_INSTRUCTIONS, FAREWELL_NOTE]
     if name:
         parts.append(f"Negocio: {name}.")
     for label, key in (("Tono", "tone"), ("Horario", "hours"), ("Preguntas frecuentes", "faq")):

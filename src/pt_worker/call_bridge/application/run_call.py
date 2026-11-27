@@ -20,6 +20,7 @@ from pt_worker.call_bridge.application.conversation import (
     ConversationSpec,
     build_conversation,
 )
+from pt_worker.call_bridge.application.farewell import is_farewell
 from pt_worker.call_bridge.application.ports import (
     CallContextSource,
     CallEvents,
@@ -115,7 +116,7 @@ async def run_call(
     reason = EndReason.COMPLETED
     error: str | None = None
     try:
-        outcome = await _supervise_with_check(engine, services, call, check)
+        outcome = await _supervise_with_check(engine, services, call, check, turns.farewell)
         if outcome is None:
             # 409 del GET de comprobación: la app ya cerró la llamada; sin `end` para no pisarla.
             logger.warning("la llamada ya había terminado (409); se cuelga la sala")
@@ -161,11 +162,12 @@ async def _supervise_with_check(
     services: CallServices,
     call: Call,
     check: asyncio.Future[bool] | None,
+    farewell: asyncio.Event | None = None,
 ) -> tuple[EndReason, str | None] | None:
     """Supervisa la llamada; devuelve None si la comprobación en paralelo detectó un 409."""
     if check is None:
-        return await _supervise(engine, services, call)
-    supervise = asyncio.ensure_future(_supervise(engine, services, call))
+        return await _supervise(engine, services, call, farewell)
+    supervise = asyncio.ensure_future(_supervise(engine, services, call, farewell))
     waiting: set[asyncio.Future[Any]] = {supervise, check}
     try:
         await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
@@ -226,11 +228,18 @@ class _TurnRecorder:
         self._call_id, self._call, self._services = call_id, call, services
         self._seq = 0
         self._tasks: set[asyncio.Task[None]] = set()
+        self.farewell = asyncio.Event()  # se activa cuando el asistente respondió la despedida
+        self._customer_said_goodbye = False
 
     def handle(self, role: str, text: str) -> None:
         if not text.strip() or role not in ("user", "assistant"):
             return
         self._seq += 1  # síncrono: el orden de `seq` es el de llegada
+        if role == "user":
+            self._customer_said_goodbye = is_farewell(text)
+        elif self._customer_said_goodbye:  # el asistente ya contestó la despedida: se puede colgar
+            self._customer_said_goodbye = False
+            self.farewell.set()
         started_ms = int(self._call.elapsed(self._services.clock.now()) * 1000)
         task = asyncio.ensure_future(
             self._services.events.record_turn(self._call_id, self._seq, role, text, started_ms)
@@ -249,7 +258,10 @@ class _TurnRecorder:
 
 
 async def _supervise(
-    engine: VoiceEngine, services: CallServices, call: Call
+    engine: VoiceEngine,
+    services: CallServices,
+    call: Call,
+    farewell: asyncio.Event | None = None,
 ) -> tuple[EndReason, str | None]:
     """Espera el cierre con el tope de duración: despedida a `goodbye_at`, corte a `max`.
 
@@ -257,14 +269,17 @@ async def _supervise(
     """
     now = services.clock.now
     hangup = asyncio.ensure_future(engine.wait_for_hangup())
+    farewell_wait = asyncio.ensure_future(farewell.wait()) if farewell is not None else None
     timer: asyncio.Future[None] | None = None
     try:
         timer = asyncio.ensure_future(
             services.sleep(max(0.0, call.limits.goodbye_at_seconds - call.elapsed(now())))
         )
-        await asyncio.wait({hangup, timer}, return_when=asyncio.FIRST_COMPLETED)
+        await _wait_first(hangup, timer, farewell_wait)
         if hangup.done():
             return hangup.result(), None
+        if farewell_wait is not None and farewell_wait.done():
+            return await _hang_up_after_farewell(engine, services)
 
         if call.should_say_goodbye(now()):
             call.begin_ending()
@@ -277,22 +292,38 @@ async def _supervise(
         timer = asyncio.ensure_future(
             services.sleep(max(0.0, call.limits.max_call_seconds - call.elapsed(now())))
         )
-        await asyncio.wait({hangup, timer}, return_when=asyncio.FIRST_COMPLETED)
+        await _wait_first(hangup, timer, farewell_wait)
         if hangup.done():
             return hangup.result(), None
+        if farewell_wait is not None and farewell_wait.done():
+            return await _hang_up_after_farewell(engine, services)
         # El temporizador venció: se corta siempre, aunque despierte una pizca antes del límite.
         if await _hang_up(engine, services):
             return EndReason.TIME_LIMIT, None
         logger.error("el corte duro agotó los intentos; la sala pudo quedar abierta")
         return EndReason.TIME_LIMIT, HANGUP_FAILED
     finally:
-        for task in (timer, hangup):
+        for task in (timer, hangup, farewell_wait):
             if task is not None and not task.done():
                 task.cancel()
-        for task in (timer, hangup):
+        for task in (timer, hangup, farewell_wait):
             if task is not None:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await task
+
+
+async def _wait_first(*futures: asyncio.Future[Any] | None) -> None:
+    pending: set[asyncio.Future[Any]] = {f for f in futures if f is not None}
+    await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+
+
+async def _hang_up_after_farewell(
+    engine: VoiceEngine, services: CallServices
+) -> tuple[EndReason, str | None]:
+    """El cliente se despidió y el asistente ya contestó: se cuelga y se cierra como `completed`."""
+    if await _hang_up(engine, services):
+        return EndReason.COMPLETED, None
+    return EndReason.COMPLETED, HANGUP_FAILED
 
 
 DRAIN_TIMEOUT_SEC = 2.0  # tope de espera de los envíos de turnos antes de publicar `end`
