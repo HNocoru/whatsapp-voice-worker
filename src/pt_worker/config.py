@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     worker_id: str
 
     # Timeouts por petición según docs/04-worker-contract.md (context y tools 3 s; turns y end 5 s)
-    timeout_context_sec: float = 3.0
+    timeout_context_sec: float = 8.0
     timeout_write_sec: float = 5.0
     heartbeat_interval_sec: int = 30
 

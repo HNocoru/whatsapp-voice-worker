@@ -344,7 +344,7 @@ async def test_hard_cut_gives_up_after_bounded_attempts_but_still_reports_time_l
     assert app.ends[CALL_ID]["error"] == "hangup_failed"  # la sala pudo quedar abierta
 
 
-async def test_context_failure_starts_generic_after_a_single_timeout() -> None:
+async def test_context_failure_starts_generic_after_one_retry() -> None:
     import httpx
 
     from pt_worker.app_client.http import HttpAppClient
@@ -374,8 +374,9 @@ async def test_context_failure_starts_generic_after_a_single_timeout() -> None:
     engine = FakeEngine()
     reason = await run_call(CALL_ID, engine, services)
     assert reason is EndReason.COMPLETED
-    assert len(attempts) == 1  # un solo intento de GET context
-    assert all(s > 100 for s in sleeps)  # solo temporizadores del tope, sin backoff de contexto
+    assert len(attempts) == 2  # GET context: primer intento + 1 reintento (8 s cada uno)
+    backoffs = [s for s in sleeps if s < 100]
+    assert len(backoffs) == 1  # solo la pausa del reintento; el resto son temporizadores del tope
     assert engine.started[0]["voice"] == "roberto"  # configuración genérica
 
 
@@ -498,3 +499,105 @@ async def test_drain_is_bounded_when_turn_sends_are_slow(monkeypatch: pytest.Mon
     finally:
         for task in list(recorder._tasks):
             task.cancel()
+
+
+# --- snapshot del contexto en la metadata del job -----------------------------------------------
+
+from dataclasses import replace  # noqa: E402
+
+from pt_worker.call_bridge.application.call_id import resolve_context  # noqa: E402
+
+
+class CountingContext:
+    """Fuente de contexto falsa que cuenta los GET; devuelve un valor o lanza una excepción."""
+
+    def __init__(self, value: dict[str, Any] | None = None, exc: Exception | None = None) -> None:
+        self.calls: list[str] = []
+        self._value, self._exc = value, exc
+
+    async def fetch(self, call_id: str) -> dict[str, Any] | None:
+        self.calls.append(call_id)
+        if self._exc is not None:
+            raise self._exc
+        return self._value
+
+
+SNAPSHOT = {
+    "business": {"name": "Tienda Sol", "faq": "Abrimos en Centro", "hours": "9 a 18 h"},
+    "contact": {"display_name": "Ana"},
+    "limits": {"max_call_seconds": 300, "goodbye_at_seconds": 270},
+}
+
+
+def test_resolve_context_reads_snapshot_only_when_business_is_a_dict() -> None:
+    meta = f'{{"call_id": "{CALL_ID}", "context": {{"business": {{"name": "Sol"}}}}}}'
+    assert resolve_context(meta) == {"business": {"name": "Sol"}}
+    assert resolve_context(f'{{"call_id": "{CALL_ID}"}}') is None
+    assert resolve_context('{"context": {"business": "no es dict"}}') is None
+    assert resolve_context('{"context": ["lista"]}') is None
+    assert resolve_context("no es json") is None
+    assert resolve_context(None) is None
+
+
+async def test_snapshot_from_job_metadata_reaches_the_prompt_without_waiting_for_the_get() -> None:
+    app, clock = FakeAppClient(), FakeClock()
+    other = {"business": {"name": "Otro", "faq": "texto del GET"}}
+    services = replace(make(app, clock), context_source=CountingContext(value=other))
+    engine = FakeEngine()
+    await run_call(CALL_ID, engine, services, snapshot=SNAPSHOT)
+    assert "Abrimos en Centro" in engine.started[0]["instructions"]  # sale del snapshot
+    assert "texto del GET" not in engine.started[0]["instructions"]  # el GET solo comprueba 409
+
+
+async def test_without_snapshot_the_get_is_used(caplog: pytest.LogCaptureFixture) -> None:
+    app, clock = FakeAppClient(), FakeClock()
+    source = CountingContext(value=SNAPSHOT)
+    services = replace(make(app, clock), context_source=source)
+    with caplog.at_level("INFO"):
+        await run_call(CALL_ID, FakeEngine(), services)
+    assert source.calls == [CALL_ID]
+    assert "fuente=http" in caplog.text
+
+
+async def test_snapshot_log_has_source_and_lengths_but_no_client_text(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    app, clock = FakeAppClient(), FakeClock()
+    services = replace(make(app, clock), context_source=CountingContext(exc=RuntimeError("x")))
+    with caplog.at_level("INFO"):
+        await run_call(CALL_ID, FakeEngine(), services, snapshot=SNAPSHOT)
+    line = next(r.getMessage() for r in caplog.records if "fuente=" in r.getMessage())
+    assert "fuente=metadata" in line
+    assert "faq=17" in line  # longitud, no texto
+    assert "horario=" in line and "prompt=" in line
+    assert "Abrimos" not in caplog.text and "Tienda Sol" not in caplog.text
+
+
+def test_snapshot_with_another_call_id_is_ignored(caplog: pytest.LogCaptureFixture) -> None:
+    other = "11111111-1111-4111-8111-111111111111"
+    meta = f'{{"call_id": "{other}", "context": {{"business": {{"name": "Sol"}}}}}}'
+    with caplog.at_level("WARNING"):
+        assert resolve_context(meta, expected_call_id=CALL_ID) is None
+    assert "no coincide" in caplog.text and "Sol" not in caplog.text
+    same = f'{{"call_id": "{CALL_ID}", "context": {{"business": {{"name": "Sol"}}}}}}'
+    assert resolve_context(same, expected_call_id=CALL_ID) == {"business": {"name": "Sol"}}
+
+
+async def test_snapshot_with_409_check_hangs_up_and_publishes_no_end() -> None:
+    app, clock = FakeAppClient(), FakeClock()
+    source = CountingContext(exc=CallAlreadyEndedError("409"))
+    services = replace(make(app, clock), context_source=source)
+    engine = FakeEngine(hangup=None)  # la llamada no se cierra sola: solo el 409 puede cortarla
+    reason = await run_call(CALL_ID, engine, services, snapshot=SNAPSHOT)
+    assert reason is EndReason.FAILED
+    assert source.calls == [CALL_ID]  # el GET de comprobación sí corrió
+    assert engine.hangups >= 1
+    assert CALL_ID not in app.ends  # sin `end`: no se sobrescribe la llamada ya cerrada
+
+
+async def test_snapshot_check_failing_for_other_reasons_does_not_affect_the_call() -> None:
+    app, clock = FakeAppClient(), FakeClock()
+    services = replace(make(app, clock), context_source=CountingContext(exc=TimeoutError()))
+    reason = await run_call(CALL_ID, FakeEngine(), services, snapshot=SNAPSHOT)
+    assert reason is EndReason.COMPLETED
+    assert app.ends[CALL_ID]["ended_reason"] == "completed"

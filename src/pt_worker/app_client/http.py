@@ -15,6 +15,8 @@ import httpx
 
 from pt_worker.app_client.port import AppClientError, CallAlreadyEndedError
 
+CONTEXT_ATTEMPTS = 2  # GET de contexto: primer intento + 1 reintento
+
 
 class HttpAppClient:
     def __init__(
@@ -22,7 +24,7 @@ class HttpAppClient:
         base_url: str,
         token: str,
         *,
-        timeout_context: float = 3.0,
+        timeout_context: float = 8.0,
         timeout_write: float = 5.0,
         max_attempts: int = 3,
         backoff_base: float = 0.5,
@@ -41,7 +43,12 @@ class HttpAppClient:
         )
 
     async def _request(
-        self, method: str, path: str, *, timeout: float, json: Any = None,
+        self,
+        method: str,
+        path: str,
+        *,
+        timeout: float,
+        json: Any = None,
         max_attempts: int | None = None,
     ) -> httpx.Response:
         attempts = max_attempts or self._max_attempts
@@ -71,8 +78,10 @@ class HttpAppClient:
 
     async def get_context(self, call_id: str) -> dict[str, Any] | None:
         path = f"/api/internal/calls/{call_id}/context"
-        # Un solo intento: si la app falla se arranca con configuración genérica (contrato).
-        resp = await self._request("GET", path, timeout=self._timeout_context, max_attempts=1)
+        # Un reintento tras el primero; si fallan los dos se arranca con configuración genérica.
+        resp = await self._request(
+            "GET", path, timeout=self._timeout_context, max_attempts=CONTEXT_ATTEMPTS
+        )
         if resp.status_code == 404:
             return None
         self._raise_for_client_error(resp, path)

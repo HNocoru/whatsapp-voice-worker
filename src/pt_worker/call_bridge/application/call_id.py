@@ -12,10 +12,14 @@ La primera prueba con una llamada real decide cuál sobra.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections.abc import Mapping
 
+logger = logging.getLogger(__name__)
+
 ATTRIBUTE_NAME = "call_id"
+CONTEXT_KEY = "context"  # snapshot del contexto que la app mete en la metadata del job
 
 
 class MissingCallIdError(Exception):
@@ -41,3 +45,29 @@ def resolve_call_id(job_metadata: str | None, participant_attributes: Mapping[st
         return found
     msg = "no hay call_id (UUID) ni en la metadata del job ni en los atributos del participante"
     raise MissingCallIdError(msg)
+
+
+def resolve_context(
+    job_metadata: str | None, expected_call_id: str | None = None
+) -> dict[str, object] | None:
+    """Snapshot del contexto en la metadata del job (`{"call_id", "context": {...}}`), o None.
+
+    Solo se acepta si `context` es un objeto con `business` objeto; si no, se usa el GET.
+    Si el `call_id` del snapshot no coincide con el resuelto se ignora (aviso sin contenido).
+    """
+    if not job_metadata or not job_metadata.strip():
+        return None
+    try:
+        data = json.loads(job_metadata)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    ctx = data.get(CONTEXT_KEY)
+    if not (isinstance(ctx, dict) and isinstance(ctx.get("business"), dict)):
+        return None
+    snapshot_id = _valid(data.get(ATTRIBUTE_NAME))
+    if expected_call_id is not None and snapshot_id != expected_call_id:
+        logger.warning("el snapshot de la metadata no coincide con el call_id; se usa el GET")
+        return None
+    return ctx

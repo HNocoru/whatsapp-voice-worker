@@ -17,7 +17,11 @@ from typing import Any
 
 from livekit.agents import AgentServer, JobContext, cli
 
-from pt_worker.call_bridge.application.call_id import MissingCallIdError, resolve_call_id
+from pt_worker.call_bridge.application.call_id import (
+    MissingCallIdError,
+    resolve_call_id,
+    resolve_context,
+)
 from pt_worker.call_bridge.application.ports import VoiceEngine
 from pt_worker.call_bridge.application.run_call import (
     CallServices,
@@ -127,7 +131,9 @@ async def _run_job(
         services = services_factory()
         engine = engine_factory(ctx, participant.identity)
         # run_call pide el contexto, arranca Phonic (con reintentos) y publica `end` siempre.
-        await run_call(call_id, engine, services)
+        await run_call(
+            call_id, engine, services, snapshot=resolve_context(ctx.job.metadata, call_id)
+        )
     except Exception as exc:  # noqa: BLE001 - un fallo de armado no debe dejar la sala abierta
         logger.error("la llamada no pudo atenderse: %s", type(exc).__name__)
         with contextlib.suppress(Exception):

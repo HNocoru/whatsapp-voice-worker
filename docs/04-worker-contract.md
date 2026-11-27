@@ -26,6 +26,12 @@ Estado: **Propuesta v0**. Se implementa en el slice 02 (llamada contestada) y se
   en slice 02: cómo exactamente lo expone el Connector de WhatsApp).
   Acordado 2026-11-27: la app lo manda en `agents[].metadata` de `AcceptWhatsAppCall` como JSON
   `{"call_id": "<uuid>"}`, con nombre de agente `whatsapp-agent`.
+- **Snapshot del contexto (acordado 2026-11-27):** la misma metadata puede traer el contexto ya
+  armado: `{"call_id": "<uuid>", "context": { ...mismo JSON que devuelve GET context... }}`
+  (la app lo limita a 48 000 bytes). El worker lo usa sin esperar el GET si `context` es un objeto
+  con `business` objeto y su `call_id` coincide con el del despacho; si no, ignora el snapshot y
+  hace el GET. Con snapshot, el worker hace además un GET de comprobación en paralelo que no
+  bloquea el arranque: si responde 409 cuelga la sala y no manda `end`.
 - El worker nunca recibe ni envía `tenant_id`: la app lo deduce del `call_id`.
 
 ## Endpoints
@@ -111,7 +117,8 @@ de salud del dashboard. Respuesta 204. Estado 2026-11-27: el worker **aún no ma
 
 ## Reglas de fallo en el worker
 
-- Timeout por petición: 3 s (context y tools), 5 s (turns y end).
+- Timeout por petición: 8 s por intento en `GET context` (un reintento tras el primero; sin
+  snapshot el peor caso es ~16.6 s antes de arrancar), 3 s en tools, 5 s en turns y end.
 - Reintento con backoff y jitter solo ante 5xx, 429 o error de red; nunca ante 4xx.
 - `turns` y `end` se encolan en memoria del proceso y se reintentan hasta 2 min después de colgar.
 - Ningún error de la app tumba una llamada en curso.

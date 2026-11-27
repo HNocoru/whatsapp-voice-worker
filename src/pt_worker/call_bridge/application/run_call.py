@@ -69,22 +69,35 @@ async def run_call(
     services: CallServices,
     *,
     utcnow: Callable[[], datetime] = lambda: datetime.now(UTC),
+    snapshot: dict[str, Any] | None = None,
 ) -> EndReason:
-    """Corre una llamada hasta que se cuelga. Nunca lanza por fallos de la app."""
+    """Corre una llamada hasta que se cuelga. Nunca lanza por fallos de la app.
+
+    Si la metadata del job trae el snapshot del contexto, se usa sin esperar el GET.
+    """
     context: dict[str, Any] | None = None
-    try:
-        context = await services.context_source.fetch(call_id)
-    except CallAlreadyEndedError:
-        # 409: la app ya cerró la llamada. No se abre Phonic ni se manda `end` (no sobrescribir).
-        logger.warning("la llamada ya había terminado (409); se cuelga la sala sin conversar")
-        if not await _hang_up(engine, services):
-            logger.error("no se pudo colgar tras el 409; la sala pudo quedar abierta")
-        return EndReason.FAILED
-    except Exception as exc:  # noqa: BLE001 - la llamada sigue con configuración genérica
-        logger.warning("sin contexto (%s); configuración genérica", type(exc).__name__)
+    source = "ninguno"
+    check: asyncio.Future[bool] | None = None
+    if snapshot is not None:
+        context, source = snapshot, "metadata"
+        # GET de comprobación en paralelo: solo detecta que la app ya cerró la llamada (409).
+        check = asyncio.ensure_future(_ended_by_app(call_id, services))
+    else:
+        try:
+            context = await services.context_source.fetch(call_id)
+            source = "http" if context is not None else "ninguno"
+        except CallAlreadyEndedError:
+            # 409: la app ya cerró la llamada. No se abre Phonic ni se manda `end`.
+            logger.warning("la llamada ya había terminado (409); se cuelga la sala sin conversar")
+            if not await _hang_up(engine, services):
+                logger.error("no se pudo colgar tras el 409; la sala pudo quedar abierta")
+            return EndReason.FAILED
+        except Exception as exc:  # noqa: BLE001 - la llamada sigue con configuración genérica
+            logger.warning("sin contexto (%s); configuración genérica", type(exc).__name__)
 
     clock = services.clock
     spec = build_conversation(context, services.default_voice)
+    _log_context_source(source, context, spec)
     call = Call(call_id, _limits_from(context))
     turns = _TurnRecorder(call_id, call, services)
     engine.on_turn(turns.handle)
@@ -102,7 +115,15 @@ async def run_call(
     reason = EndReason.COMPLETED
     error: str | None = None
     try:
-        reason, error = await _supervise(engine, services, call)
+        outcome = await _supervise_with_check(engine, services, call, check)
+        if outcome is None:
+            # 409 del GET de comprobación: la app ya cerró la llamada; sin `end` para no pisarla.
+            logger.warning("la llamada ya había terminado (409); se cuelga la sala")
+            if not await _hang_up(engine, services):
+                logger.error("no se pudo colgar tras el 409; la sala pudo quedar abierta")
+            await turns.drain()
+            return EndReason.FAILED
+        reason, error = outcome
     except Exception as exc:  # noqa: BLE001 - se cierra como fallida y se informa a la app
         logger.error("la llamada falló: %s", type(exc).__name__)
         reason, error = EndReason.FAILED, type(exc).__name__
@@ -122,6 +143,58 @@ async def run_call(
         },
     )
     return reason
+
+
+async def _ended_by_app(call_id: str, services: CallServices) -> bool:
+    """True solo si el GET responde 409. Cualquier otro resultado o fallo no afecta la llamada."""
+    try:
+        await services.context_source.fetch(call_id)
+    except CallAlreadyEndedError:
+        return True
+    except Exception as exc:  # noqa: BLE001 - es solo una comprobación
+        logger.info("GET de comprobación sin resultado (%s)", type(exc).__name__)
+    return False
+
+
+async def _supervise_with_check(
+    engine: VoiceEngine,
+    services: CallServices,
+    call: Call,
+    check: asyncio.Future[bool] | None,
+) -> tuple[EndReason, str | None] | None:
+    """Supervisa la llamada; devuelve None si la comprobación en paralelo detectó un 409."""
+    if check is None:
+        return await _supervise(engine, services, call)
+    supervise = asyncio.ensure_future(_supervise(engine, services, call))
+    waiting: set[asyncio.Future[Any]] = {supervise, check}
+    try:
+        await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+        if check.done() and not check.cancelled() and check.result():
+            return None
+        return await supervise
+    finally:
+        for task in (supervise, check):
+            if not task.done():
+                task.cancel()
+        for task in (supervise, check):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+
+def _log_context_source(
+    source: str, context: dict[str, Any] | None, spec: ConversationSpec
+) -> None:
+    """Registra de dónde salió el contexto. Solo longitudes: nunca texto del cliente ni secretos."""
+    business = (context or {}).get("business")
+    business = business if isinstance(business, dict) else {}
+    faq, hours = business.get("faq"), business.get("hours")
+    logger.info(
+        "contexto de la llamada: fuente=%s, faq=%d, horario=%d, prompt=%d",
+        source,
+        len(faq) if isinstance(faq, str) else 0,
+        len(hours) if isinstance(hours, str) else 0,
+        len(spec.instructions),
+    )
 
 
 async def _start_with_retries(

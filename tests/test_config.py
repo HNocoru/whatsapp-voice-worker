@@ -44,7 +44,7 @@ def test_loads_when_everything_is_set(monkeypatch: pytest.MonkeyPatch) -> None:
     set_env(monkeypatch)
     settings = get_settings()
     assert settings.worker_id == "worker-1"
-    assert settings.timeout_context_sec == 3.0
+    assert settings.timeout_context_sec == 8.0
     assert settings.timeout_write_sec == 5.0
 
 

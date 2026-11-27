@@ -107,7 +107,7 @@ async def test_timeouts_follow_the_contract() -> None:
     await client.post_end("c1", {})
     await client.post_heartbeat("w1", 0, "0.1.0")
     read_timeouts = [r.extensions["timeout"]["read"] for r in rec.requests]
-    assert read_timeouts == [3.0, 5.0, 5.0, 5.0]
+    assert read_timeouts == [8.0, 5.0, 5.0, 5.0]
 
 
 async def test_retries_network_errors() -> None:

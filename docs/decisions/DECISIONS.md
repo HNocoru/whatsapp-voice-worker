@@ -132,8 +132,12 @@ Pendiente con la sesión de la app (gentle-shell 01a20c84-0f1c-7467-a992-e9f805a
 - Qué hace la app con `time_limit` y si espera un `error` en `end` para él.
 
 Correcciones tras la verificación independiente (W2):
-- `GET context` hace un solo intento (timeout 3 s); si falla se arranca con configuración genérica sin esperar
-  reintentos. `turns`/`end` conservan reintento y backoff.
+- `GET context`: timeout 8 s con un reintento (cambio 2026-11-27, pedido por la app; antes 3 s y un solo
+  intento). Si fallan los dos se arranca con configuración genérica. `turns`/`end` conservan reintento y backoff.
+- Snapshot del contexto en la metadata del job (clave `context`): el worker lo usa sin esperar el GET; si
+  falta, es inválido o su `call_id` no coincide, cae al GET. Con snapshot hace un GET de comprobación en
+  paralelo; un 409 cuelga la sala sin abrir `end`. Phonic puede haber arrancado ya (deuda aceptada).
+  Log por llamada: fuente (metadata|http|ninguno), longitudes de faq/horario/prompt, sin texto del cliente.
 - `TurnBuffer` borra los turnos entregados por `seq`, no por posición (con envíos en vuelo se perdían turnos).
 - Todo texto del cliente (nombre, memoria, turnos recientes) va marcado como datos, no órdenes.
 - `business.language` se valida contra una lista cerrada (`{"es"}`); si no coincide, `es`.
