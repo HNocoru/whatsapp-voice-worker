@@ -174,3 +174,41 @@ def test_unknown_app_language_falls_back_to_spanish() -> None:
     assert build_conversation({"business": {"language": "xx; DROP"}}, "roberto").language == "es"
     assert build_conversation({"business": {"language": "ES"}}, "roberto").language == "es"
     assert build_conversation({"business": {"language": "en"}}, "roberto").language == "es"
+
+
+REAL_APP_CONTEXT: dict[str, Any] = {
+    "business": {
+        "name": "Taquería Lupe",
+        "tone": "cercano",
+        "faq": "Hay salsa verde",
+        "hours": "9 a 18",
+        "voice": "roberto",
+        "language": "es",
+    },
+    "contact": {"display_name": None, "is_new": True},
+    "recent_turns": [],
+    "memory": {"summary": "", "facts": {}},
+}
+
+
+def test_real_app_payload_with_empty_memory_has_no_memory_block() -> None:
+    spec = build_conversation(REAL_APP_CONTEXT, "roberto")
+    assert "Memoria" not in spec.instructions
+    assert "{}" not in spec.instructions
+    assert "None" not in spec.instructions
+    assert "Taquería Lupe" in spec.instructions
+    assert "primera vez" in spec.instructions
+    assert spec.welcome_message is None
+    assert spec.template_variables["contact_name"] == ""
+
+
+def test_missing_optional_fields_do_not_raise() -> None:
+    minimal = {"business": {"name": "X"}, "contact": {"display_name": None, "is_new": False}}
+    assert "X" in build_conversation(minimal, "roberto").instructions
+
+
+async def test_run_call_with_real_payload_and_no_limits_uses_default_limits() -> None:
+    app, clock, engine = FakeAppClient(context=REAL_APP_CONTEXT), FakeClock(), FakeEngine()
+    await run_call(CALL_ID, engine, make(app, clock))
+    assert len(engine.started) == 1
+    assert app.ends[CALL_ID]["ended_reason"] == "completed"

@@ -419,3 +419,47 @@ async def test_start_failure_with_hanging_hangup_still_publishes_failed() -> Non
     assert reason is EndReason.FAILED
     assert engine.hangups == 3
     assert app.ends[CALL_ID]["ended_reason"] == "failed"
+
+
+class RaisingContext:
+    """Fuente de contexto que lanza el error indicado (409, timeout, 5xx)."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    async def fetch(self, call_id: str) -> dict[str, Any] | None:
+        raise self._exc
+
+
+async def test_context_409_does_not_start_phonic_nor_publish_end_but_hangs_up() -> None:
+    app, clock, engine = FakeAppClient(), FakeClock(), FakeEngine()
+    services = make(app, clock)
+    services = CallServices(
+        context_source=RaisingContext(CallAlreadyEndedError("409")),
+        events=services.events,
+        clock=clock,
+        close=app.aclose,
+        sleep=services.sleep,
+    )
+    await run_call(CALL_ID, engine, services)  # no lanza
+    assert engine.started == []
+    assert app.ends == {}
+    assert engine.hangups >= 1
+
+
+@pytest.mark.parametrize("exc", [TimeoutError("lento"), ConnectionError("5xx")])
+async def test_context_timeout_or_5xx_still_starts_generic_conversation(exc: Exception) -> None:
+    app, clock, engine = FakeAppClient(), FakeClock(), FakeEngine()
+    base = make(app, clock)
+    services = CallServices(
+        context_source=RaisingContext(exc),
+        events=base.events,
+        clock=clock,
+        close=app.aclose,
+        sleep=base.sleep,
+    )
+    await run_call(CALL_ID, engine, services)
+    assert len(engine.started) == 1
+    assert engine.started[0]["voice"] == "roberto"
+    assert engine.hangups == 0
+    assert app.ends[CALL_ID]["ended_reason"] == "completed"

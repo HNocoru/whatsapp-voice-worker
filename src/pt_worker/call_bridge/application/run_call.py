@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from pt_worker.app_client.port import CallAlreadyEndedError
 from pt_worker.call_bridge.application.conversation import (
     GOODBYE_INSTRUCTIONS,
     ConversationSpec,
@@ -73,6 +74,12 @@ async def run_call(
     context: dict[str, Any] | None = None
     try:
         context = await services.context_source.fetch(call_id)
+    except CallAlreadyEndedError:
+        # 409: la app ya cerró la llamada. No se abre Phonic ni se manda `end` (no sobrescribir).
+        logger.warning("la llamada ya había terminado (409); se cuelga la sala sin conversar")
+        if not await _hang_up(engine, services):
+            logger.error("no se pudo colgar tras el 409; la sala pudo quedar abierta")
+        return EndReason.FAILED
     except Exception as exc:  # noqa: BLE001 - la llamada sigue con configuración genérica
         logger.warning("sin contexto (%s); configuración genérica", type(exc).__name__)
 

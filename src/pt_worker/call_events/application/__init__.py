@@ -44,6 +44,7 @@ class TurnBuffer:
         self._sleep = sleep
         self._now = now
         self._pending: dict[str, list[dict[str, Any]]] = {}
+        self._locks: dict[str, asyncio.Lock] = {}  # single-flight: un POST turns por llamada
 
     async def record_turn(
         self, call_id: str, seq: int, role: str, text: str, started_ms: int
@@ -54,6 +55,12 @@ class TurnBuffer:
         await self._flush_turns(call_id)  # un fallo deja los turnos para el siguiente intento
 
     async def _flush_turns(self, call_id: str) -> bool:
+        # Un solo envío en vuelo por llamada: los turnos nuevos esperan y salen en el siguiente.
+        # La app no impone UNIQUE(call_id, position); evitar el reenvío simultáneo evita duplicados.
+        async with self._locks.setdefault(call_id, asyncio.Lock()):
+            return await self._send_pending(call_id)
+
+    async def _send_pending(self, call_id: str) -> bool:
         turns = self._pending.get(call_id)
         if not turns:
             return True
@@ -63,8 +70,7 @@ class TurnBuffer:
         except Exception as exc:  # noqa: BLE001 - ningún error de la app tumba la llamada
             logger.warning("turnos sin entregar (%s); se reintentan", type(exc).__name__)
             return False
-        # Se borra por `seq` y no por posición: con envíos en vuelo la lista puede haber cambiado.
-        # Idempotente por (call_id, seq): reenviar de más no duplica.
+        # Se borra por `seq` y no por posición: `record_turn` agrega a la lista mientras se envía.
         delivered = {turn["seq"] for turn in sent}
         turns[:] = [turn for turn in turns if turn["seq"] not in delivered]
         return True
@@ -77,12 +83,14 @@ class TurnBuffer:
             if remaining <= 0:
                 logger.error("se agotó la ventana de reintento; end/turnos perdidos")
                 self._pending.pop(call_id, None)
+                self._locks.pop(call_id, None)
                 return
             try:
                 async with asyncio.timeout(remaining):  # el último intento no rebasa el plazo
                     if await self._flush_turns(call_id):
                         await self._sink.send_end(call_id, payload)
                         self._pending.pop(call_id, None)
+                        self._locks.pop(call_id, None)
                         return
             except Exception as exc:  # noqa: BLE001
                 logger.warning("end sin entregar (%s); se reintenta", type(exc).__name__)
