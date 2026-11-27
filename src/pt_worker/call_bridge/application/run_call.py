@@ -252,17 +252,23 @@ async def report_start_failure(
     services: CallServices,
     *,
     utcnow: Callable[[], datetime] = lambda: datetime.now(UTC),
+    error: str | None = None,
+    answered: bool = True,
 ) -> None:
-    """La llamada nunca arrancó (el motor no inició): la app igual recibe `end` con `failed`."""
-    logger.error("el motor de voz no inició: %s", type(exc).__name__)
+    """La llamada nunca arrancó: la app igual recibe `end` con `failed`.
+
+    `error` explícito (texto fijo, no sensible) reemplaza al tipo de `exc`; `answered=False`
+    manda `answered_at` null (nadie entró a la sala).
+    """
+    logger.error("la llamada no arrancó: %s", type(exc).__name__)
     now = utcnow().isoformat()
     await services.events.publish_end(
         call_id,
         {
             "ended_reason": EndReason.FAILED.value,
-            "answered_at": now,
+            "answered_at": now if answered else None,
             "ended_at": now,
             "duration_sec": 0,
-            "error": type(exc).__name__,
+            "error": error if error is not None else type(exc).__name__,
         },
     )

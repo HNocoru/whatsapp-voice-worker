@@ -164,3 +164,78 @@ async def test_trace_failure_breaks_nothing_when_wait_yields() -> None:
         trace_interval=0.01,
     )
     assert ctx.shutdowns == ["missing_call_id"]
+
+
+# --- F15: tope a la espera del participante ---------------------------------------------------
+async def _never(_ctx: Any) -> Any:
+    await asyncio.Event().wait()
+
+
+def _no_engine(_ctx: Any, _identity: str) -> Any:
+    raise AssertionError("no debe crearse motor de voz si el participante nunca llegó")
+
+
+async def test_wait_timeout_publishes_failed_end_and_closes_room(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import json
+
+    from tests.test_run_call import CALL_ID
+
+    app = FakeAppClient()
+    ctx: Any = FakeCtx(json.dumps({"call_id": CALL_ID}))
+    ctx.room = FakeRoom()
+    await handle_job(
+        ctx,
+        lambda: make(app, FakeClock()),
+        _no_engine,
+        wait=_never,
+        participant_timeout_sec=0.05,
+        trace_interval=0.01,
+        trace_duration=1000.0,
+    )
+    end = app.ends[CALL_ID]
+    assert end["ended_reason"] == "failed"
+    assert end["error"] == "no_participant"
+    assert end["answered_at"] is None
+    assert end["duration_sec"] == 0
+    assert end["ended_at"]
+    assert ctx.deleted == 1
+    assert ctx.shutdowns == ["no_participant"]
+    assert "TimeoutError" in caplog.text
+    assert [t for t in asyncio.all_tasks() if "trace_room" in repr(t)] == []
+
+
+async def test_wait_timeout_without_call_id_publishes_no_end() -> None:
+    app = FakeAppClient()
+    ctx: Any = FakeCtx("{}")
+    ctx.room = FakeRoom()
+    await handle_job(
+        ctx,
+        lambda: make(app, FakeClock()),
+        _no_engine,
+        wait=_never,
+        participant_timeout_sec=0.05,
+        trace_interval=0.01,
+    )
+    assert app.ends == {}
+    assert ctx.shutdowns == ["no_participant"]
+
+
+async def test_wait_timeout_shutdown_runs_even_if_delete_room_raises() -> None:
+    ctx: Any = FakeCtx("{}")
+    ctx.room = FakeRoom()
+
+    async def boom() -> None:
+        raise RuntimeError("x")
+
+    ctx.delete_room = boom
+    await handle_job(
+        ctx,
+        lambda: make(FakeAppClient(), FakeClock()),
+        _no_engine,
+        wait=_never,
+        participant_timeout_sec=0.05,
+        trace_interval=0.01,
+    )
+    assert ctx.shutdowns == ["no_participant"]

@@ -19,7 +19,11 @@ from livekit.agents import AgentServer, JobContext, cli
 
 from pt_worker.call_bridge.application.call_id import MissingCallIdError, resolve_call_id
 from pt_worker.call_bridge.application.ports import VoiceEngine
-from pt_worker.call_bridge.application.run_call import CallServices, run_call
+from pt_worker.call_bridge.application.run_call import (
+    CallServices,
+    report_start_failure,
+    run_call,
+)
 from pt_worker.call_bridge.infrastructure.livekit.room_trace import (
     DEFAULT_DURATION_S,
     DEFAULT_INTERVAL_S,
@@ -31,6 +35,8 @@ from pt_worker.call_bridge.infrastructure.livekit.voice_engine import LiveKitVoi
 
 logger = logging.getLogger(__name__)
 
+NO_PARTICIPANT = "no_participant"  # texto fijo para `error` y el motivo de shutdown
+PARTICIPANT_TIMEOUT_SEC = 60.0  # tope a la espera del participante (F15)
 AGENT_NAME = "whatsapp-agent"  # despacho explícito: el Connector/regla de despacho usa este nombre
 
 
@@ -50,6 +56,7 @@ async def handle_job(
     trace_interval: float = DEFAULT_INTERVAL_S,
     trace_duration: float = DEFAULT_DURATION_S,
     wait: Callable[[JobContext], Awaitable[Any]] = _default_wait,
+    participant_timeout_sec: float = PARTICIPANT_TIMEOUT_SEC,
 ) -> None:
     """Atiende una sala: espera al participante, resuelve el call_id y corre la llamada.
 
@@ -69,7 +76,9 @@ async def handle_job(
         name="trace_room",
     )
     try:
-        await _run_job(ctx, services_factory, engine_factory, wait, started)
+        await _run_job(
+            ctx, services_factory, engine_factory, wait, started, participant_timeout_sec
+        )
     finally:
         trace_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -82,8 +91,16 @@ async def _run_job(
     engine_factory: Callable[[JobContext, str], VoiceEngine],
     wait: Callable[[JobContext], Awaitable[Any]],
     started: float,
+    participant_timeout_sec: float,
 ) -> None:
-    participant = await traced_wait(ctx, wait, started=started)
+    try:
+        async with asyncio.timeout(participant_timeout_sec) as limit:
+            participant = await traced_wait(ctx, wait, started=started)
+    except TimeoutError:
+        if not limit.expired():
+            raise  # un TimeoutError propio de la espera sigue propagándose igual que antes
+        await _close_without_participant(ctx, services_factory, participant_timeout_sec)
+        return
     try:
         call_id = resolve_call_id(ctx.job.metadata, participant.attributes)
     except MissingCallIdError as exc:
@@ -109,6 +126,39 @@ async def _run_job(
             with contextlib.suppress(Exception):
                 await services.close()
         ctx.shutdown(reason="call_finished")
+
+
+async def _close_without_participant(
+    ctx: JobContext,
+    services_factory: Callable[[], CallServices],
+    timeout_sec: float,
+) -> None:
+    """El llamante nunca entró: informa `end` failed (si hay call_id), cierra la sala. No lanza."""
+    logger.warning("TimeoutError: ningún participante entró a la sala en %.1f s", timeout_sec)
+    services: CallServices | None = None
+    try:
+        try:
+            call_id = resolve_call_id(ctx.job.metadata, {})
+        except MissingCallIdError:
+            logger.error("sin participante y sin call_id en el despacho: no hay dónde publicar end")
+        else:
+            services = services_factory()
+            await report_start_failure(
+                call_id,
+                TimeoutError(),
+                services,
+                error=NO_PARTICIPANT,
+                answered=False,
+            )
+    except Exception as exc:  # noqa: BLE001 - el cierre de la sala debe correr igual
+        logger.error("no se pudo informar la llamada sin participante: %s", type(exc).__name__)
+    finally:
+        with contextlib.suppress(Exception):
+            await ctx.delete_room()
+        ctx.shutdown(reason=NO_PARTICIPANT)
+        if services is not None:
+            with contextlib.suppress(Exception):
+                await services.close()
 
 
 def create_server(

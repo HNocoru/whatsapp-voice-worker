@@ -170,6 +170,9 @@ Correcciones tras la verificación independiente (W2):
 - El contrato (`04-worker-contract.md`) se actualizó con lo acordado; debe replicarse idéntico en
   prueba-tecnic. Hallazgos en `docs/integration-findings.md`.
 - `main.py` ya no solo valida la configuración (corregida la deuda obsoleta de W0).
+- Tope de 60 s a `wait_for_participant` (F15, `PARTICIPANT_TIMEOUT_SEC`): al vencer, `end` `failed` con
+  `error="no_participant"` y `answered_at` null (si el `call_id` viene en la metadata del job), se cierra
+  la sala y se libera el slot.
 
 ## Deudas
 - `pip-audit` (listado en el roadmap de W0) no se agregó; decidir si entra en el CI de W1.
