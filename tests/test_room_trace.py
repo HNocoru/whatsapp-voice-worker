@@ -146,3 +146,21 @@ async def test_trace_failure_does_not_break_handle_job() -> None:
     ctx: Any = FakeCtx("{}")  # sin room: el trazado falla por dentro
     await handle_job(ctx, lambda: make(FakeAppClient(), FakeClock()), trace_interval=0.01)
     assert ctx.shutdowns == ["missing_call_id"]
+
+
+async def test_trace_failure_breaks_nothing_when_wait_yields() -> None:
+    # El trazado falla (la sala no existe) mientras la espera cede el control: si la excepción
+    # del trazado se propagara, handle_job se rompería. Antes la prueba pasaba aunque se propagara.
+    ctx: Any = FakeCtx("{}")
+
+    async def yielding_wait(c: Any) -> Any:
+        await asyncio.sleep(0.05)
+        return await c.wait_for_participant()
+
+    await handle_job(
+        ctx,
+        lambda: make(FakeAppClient(), FakeClock()),
+        wait=yielding_wait,
+        trace_interval=0.01,
+    )
+    assert ctx.shutdowns == ["missing_call_id"]

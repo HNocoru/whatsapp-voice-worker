@@ -37,7 +37,8 @@ Trazado de la sala (diagnóstico, `room_trace.py`): tras conectar, el worker reg
 `room_trace t=<s> remote=<n> identity=... kind=... state=...` cada 2 s durante 30 s, y `wait_start` /
 `wait_done` (o `wait_failed`) alrededor de `wait_for_participant()`. Busca `kind=PARTICIPANT_KIND_CONNECTOR`
 (`kind_details=['PARTICIPANT_KIND_DETAIL_CONNECTOR_WHATSAPP']`): si `remote=0` en todas las líneas, el
-conector nunca entró (problema del accept/despacho); si aparece pero tarde, mira `t` frente a `wait_done`.
+conector no entró a ESTA sala (puede ser un accept fallido, un despacho a otra sala u otra causa:
+cruza con el log de la app y el dashboard de LiveKit); si aparece pero tarde, mira `t` frente a `wait_done`.
 De atributos solo se registran las claves, nunca los valores.
 
 Pasos (sala de prueba; NO VERIFICADO con audio real):
