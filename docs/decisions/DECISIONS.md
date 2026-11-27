@@ -159,12 +159,20 @@ Correcciones tras la verificación independiente (W2):
   (`hangup_timeout_sec`, 10 s) por intento y 1 s de pausa. Si se agotan, se registra a nivel error.
 - Corte agotado: `ended_reason` sigue siendo `time_limit`, pero `end.error = "hangup_failed"` para señalar
   que la sala pudo quedar abierta. Es el campo `error` (string|null) de docs/04; no cambia el contrato.
-- PENDIENTE: avisar a la sesión de la app (gentle-shell 01a20c84-0f1c-7467-a992-e9f805a53d9e) por si quiere
-  tratar `error="hangup_failed"` (p. ej. alertar o reconciliar salas abiertas).
+- Avisado a la app; ver F3/F4 en docs/integration-findings.md.
+
+## Revisión del contrato con la app (2026-11-27)
+- 409 en GET context: no se abre Phonic, no se manda `end`, se cuelga la sala y `run_call` retorna.
+  404/timeout/5xx siguen con configuración genérica.
+- Turnos: single-flight por `call_id` (un POST `turns` en vuelo); los nuevos se acumulan y salen en el
+  siguiente envío. Cierra R4-003 (payload creciente) y evita duplicados mientras la app no tenga UNIQUE.
+- Contexto real de la app: `memory` vacío no genera bloque "Memoria"; sin `welcome_message`.
+- El contrato (`04-worker-contract.md`) se actualizó con lo acordado; debe replicarse idéntico en
+  prueba-tecnic. Hallazgos en `docs/integration-findings.md`.
+- `main.py` ya no solo valida la configuración (corregida la deuda obsoleta de W0).
 
 ## Deudas
 - `pip-audit` (listado en el roadmap de W0) no se agregó; decidir si entra en el CI de W1.
-- `[project.scripts]` apunta a `pt_worker.main:main`, que en W0 solo valida la configuración.
 - Un artefacto de la primera pasada con opencode dejó un `.importlinter` y un `.gitignore` que ocultaba
   `*.toml`/`*.yml`; ambos se corrigieron. Revisar con lupa lo que genere un agente externo.
 

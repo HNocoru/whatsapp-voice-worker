@@ -24,6 +24,8 @@ Estado: **Propuesta v0**. Se implementa en el slice 02 (llamada contestada) y se
 - `call_id`: UUID de la fila `calls` que crea la app al recibir el webhook `calls/connect`.
   Viaja al worker como atributo del participante o metadata del job de LiveKit (**Por verificar**
   en slice 02: cómo exactamente lo expone el Connector de WhatsApp).
+  Acordado 2026-11-27: la app lo manda en `agents[].metadata` de `AcceptWhatsAppCall` como JSON
+  `{"call_id": "<uuid>"}`, con nombre de agente `whatsapp-agent`.
 - El worker nunca recibe ni envía `tenant_id`: la app lo deduce del `call_id`.
 
 ## Endpoints
@@ -49,8 +51,13 @@ Respuesta 200:
   "limits": { "max_call_seconds": 300, "goodbye_at_seconds": 270 }
 }
 ```
-Errores: 404 si `call_id` no existe; 409 si la llamada ya terminó. Si falla o tarda, el worker sigue
-con una configuración base genérica (la llamada no se cae por esto).
+Errores: 404 si `call_id` no existe; 409 si la llamada ya terminó. Ante 404, timeout o 5xx el worker
+sigue con una configuración base genérica (la llamada no se cae por esto). Ante **409** el worker
+**no conversa**: no abre Phonic, no manda `end` (la app ya cerró la llamada) y solo cuelga la sala.
+
+Acordado 2026-11-27 (replicar idéntico en prueba-tecnic): `memory` puede ir vacío
+(`{"summary": "", "facts": {}}`) hasta que exista el snapshot; `welcome_message` no existe (el saludo
+lo genera el modelo).
 
 ### 2. `POST /api/internal/calls/{call_id}/turns`
 Turnos de transcripción, **incrementales** (para no perderlos si la llamada se corta). Lotes pequeños.
@@ -58,6 +65,9 @@ Turnos de transcripción, **incrementales** (para no perderlos si la llamada se 
 { "turns": [{ "seq": 1, "role": "user | assistant", "text": "string", "started_ms": 1234 }] }
 ```
 Idempotente por `(call_id, seq)`: reenviar el mismo `seq` no duplica. Respuesta 204.
+Acordado 2026-11-27: la BD debe imponerlo con `UNIQUE (call_id, seq)` + `ON CONFLICT DO NOTHING`
+(un filtro previo no cubre peticiones simultáneas). El worker además serializa: un solo POST `turns`
+en vuelo por llamada.
 
 ### 3. `POST /api/internal/calls/{call_id}/end`
 Al terminar la llamada.
@@ -70,11 +80,20 @@ Al terminar la llamada.
   "error": "string | null"
 }
 ```
+Acordado 2026-11-27 (replicar idéntico en prueba-tecnic):
+- `error` es texto libre y puede valer `"hangup_failed"` cuando el corte por tiempo no pudo colgar la
+  sala (`ended_reason` sigue siendo `time_limit`).
+- `ended_reason` solo acepta `completed | caller_hangup | time_limit | failed`; `hangup_failed` NUNCA
+  va como `ended_reason`.
+- Al recibir `end` con `time_limit`, la app llama `DisconnectWhatsAppCall(BUSINESS_INITIATED)` y debe
+  ignorar el error si Meta ya terminó la llamada.
+
 La app genera el **resumen** con su LLM de texto y actualiza `contact_memory`. Idempotente: un segundo
 `end` del mismo `call_id` responde 200 sin cambios. `missed` lo marca la app (llamada no contestada),
 no el worker.
 
 ### 4. `POST /api/internal/tools/{name}`
+Estado 2026-11-27: **todavía no hay ruta de tools** (ni en la app ni en el worker).
 Herramientas que el agente de voz invoca durante la llamada (slice 10, opcional).
 ```json
 { "call_id": "uuid", "arguments": {} }
@@ -84,7 +103,7 @@ Herramientas previstas: `check_availability`, `book_appointment`, `request_human
 
 ### 5. `POST /api/internal/workers/heartbeat`
 Cada 30 s. `{ "worker_id": "string", "active_calls": 0, "version": "string" }`. Alimenta el indicador
-de salud del dashboard. Respuesta 204.
+de salud del dashboard. Respuesta 204. Estado 2026-11-27: el worker **aún no manda heartbeat**.
 
 ## Reglas de fallo en el worker
 
