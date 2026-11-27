@@ -463,3 +463,34 @@ async def test_context_timeout_or_5xx_still_starts_generic_conversation(exc: Exc
     assert engine.started[0]["voice"] == "roberto"
     assert engine.hangups == 0
     assert app.ends[CALL_ID]["ended_reason"] == "completed"
+
+
+async def test_drain_is_bounded_when_turn_sends_are_slow(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Hallazgo del verificador: con envíos serializados y la app lenta, `drain` esperaba sin tope
+    # y retrasaba `end`. Ahora espera a lo sumo DRAIN_TIMEOUT_SEC; publish_end entrega el resto.
+    from pt_worker.call_bridge.application import run_call as run_call_module
+    from pt_worker.call_bridge.application.run_call import _TurnRecorder
+    from pt_worker.call_bridge.domain.call import Call
+
+    class SlowEvents:
+        async def record_turn(self, *args: Any) -> None:
+            await asyncio.sleep(5)
+
+    app, clock = FakeAppClient(), FakeClock()
+    services = make(app, clock)
+    services = CallServices(
+        context_source=services.context_source,
+        events=SlowEvents(),  # type: ignore[arg-type]
+        clock=clock,
+        close=app.aclose,
+        sleep=services.sleep,
+    )
+    monkeypatch.setattr(run_call_module, "DRAIN_TIMEOUT_SEC", 0.05)
+    recorder = _TurnRecorder(CALL_ID, Call(CALL_ID), services)
+    recorder.handle("user", "hola")
+    try:
+        async with asyncio.timeout(1):
+            await recorder.drain()
+    finally:
+        for task in list(recorder._tasks):
+            task.cancel()

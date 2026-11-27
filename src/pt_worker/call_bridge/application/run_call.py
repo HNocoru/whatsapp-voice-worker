@@ -166,8 +166,13 @@ class _TurnRecorder:
         task.add_done_callback(self._tasks.discard)
 
     async def drain(self) -> None:
+        """Espera a que los turnos queden encolados, con tope; el resto lo entrega `publish_end`.
+
+        `record_turn` agrega el turno a la lista pendiente antes de enviar; con envíos serializados
+        y la app lenta, esperar a que terminen todos retrasaría el `end` sin límite.
+        """
         if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+            await asyncio.wait(set(self._tasks), timeout=DRAIN_TIMEOUT_SEC)
 
 
 async def _supervise(
@@ -217,6 +222,7 @@ async def _supervise(
                     await task
 
 
+DRAIN_TIMEOUT_SEC = 2.0  # tope de espera de los envíos de turnos antes de publicar `end`
 HANGUP_ATTEMPTS = 3  # el corte duro se reintenta de forma acotada si LiveKit falla un momento
 HANGUP_RETRY_SEC = 1.0
 
