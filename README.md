@@ -1,6 +1,8 @@
 # whatsapp-voice-worker
 
-Worker de voz del asistente de WhatsApp (LiveKit + Phonic). Ver `AGENTS.md` y `docs/`.
+Worker de voz del asistente de WhatsApp (LiveKit Agents + Phonic, voz a voz). Habla con la app
+[`prueba-tecnic`](https://github.com/HNocoru/prueba-tecnic) solo por HTTP; el contrato está en
+[`docs/04-worker-contract.md`](docs/04-worker-contract.md) y la arquitectura en `docs/`.
 
 ## Correrlo en local (W2: conversación S2S con Phonic)
 
@@ -66,6 +68,51 @@ docker run --rm --env-file <archivo> whatsapp-voice-worker   # ejecuta `pt-worke
 Las variables van **siempre** por `--env-file` (o el gestor de secretos del host), nunca dentro de la
 imagen. El contenedor corre como usuario no root. No hay HEALTHCHECK todavía: el host debe reiniciar
 el contenedor según el código de salida (`--restart on-failure`).
+
+## Desplegarlo en LiveKit Cloud (producción)
+
+El worker corre como un agente de **LiveKit Cloud Agents**: no hay servidor propio que mantener y
+sigue activo aunque se apague tu máquina. Se construye con el `Dockerfile` del repo.
+
+1. Instala la CLI `lk` e inicia sesión: `lk cloud auth`.
+2. Crea y despliega (región cercana a tu base de datos; `us-west` en este proyecto):
+
+   ```bash
+   lk agent create --region us-west
+   ```
+
+   Guarda un `livekit.toml` local con el ID del agente (sin secretos; no se versiona).
+3. Carga los secretos. Un archivo `CLAVE=valor` **fuera del repo**, con `PHONIC_API_KEY`,
+   `APP_BASE_URL` (la URL pública de la app, sin `/` final), `WORKER_API_TOKEN` (idéntico al de la
+   app) y `WORKER_ID` (prefijo del latido, p. ej. `worker-prod`). **No** incluyas `LIVEKIT_URL`,
+   `LIVEKIT_API_KEY` ni `LIVEKIT_API_SECRET`: LiveKit Cloud los inyecta solo y no se pueden fijar.
+
+   ```bash
+   lk agent update-secrets --secrets-file /ruta/fuera/del/repo/worker.secrets --ignore-empty-secrets
+   ```
+
+   Esto reinicia el agente. Los secretos no se pueden leer de vuelta.
+4. Comprueba: `lk agent status` y `lk agent logs`. Debe aparecer `registered worker` con
+   `agent_name: whatsapp-agent`, el nombre que usa la app para despachar la llamada.
+5. Apaga cualquier worker local: con el mismo nombre de agente, las llamadas se repartirían.
+
+Para una versión nueva: `lk agent deploy`.
+
+### Cómo recibe el contexto del negocio
+
+La app mete el contexto ya armado (negocio, horarios, catálogo, preguntas frecuentes, memoria del
+contacto y turnos recientes) en la **metadata del job** al contestar la llamada:
+`{"call_id": "<uuid>", "context": {...}}` (tope de 48 000 bytes). El worker lo usa de inmediato, sin
+esperar red, y solo si el `call_id` coincide. Si falta o es inválido, pide `GET /context` a la app
+(8 s por intento y un reintento). Con snapshot, además comprueba en paralelo que la llamada siga
+abierta: si la app responde 409, cuelga la sala sin enviar `end`. Cada llamada deja en el log la
+fuente del contexto (`metadata`, `http` o `ninguno`) y solo longitudes, nunca texto del cliente.
+
+### Tope y cierre de la llamada
+
+A los 270 s el asistente se despide y a los 300 s se corta, aunque Phonic no responda. Si el
+cliente se despide ("adiós", "hasta luego", "ya es todo"), el worker cuelga tras una pausa corta y
+reporta el cierre como `completed`.
 
 ## Checks
 
