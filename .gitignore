@@ -25,3 +25,13 @@ htmlcov/
 .vscode/
 .idea/
 .DS_Store
+reference/
+odd/
+.freebuff/
+.atl/
+design/
+.codegraph/
+AGENTS.md
+pi-session-*.html
+Screenshot*
+pasted file.png
